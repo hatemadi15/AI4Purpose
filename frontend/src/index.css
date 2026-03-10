@@ -1,0 +1,142 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
+  min-height: 100vh;
+  color: #f1f5f9;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #1e293b;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #475569;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #64748b;
+}
+
+/* Glass morphism cards */
+.glass-card {
+  background: rgba(30, 41, 59, 0.8);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(71, 85, 105, 0.5);
+  border-radius: 16px;
+}
+
+/* Glowing button */
+.glow-button {
+  position: relative;
+  background: linear-gradient(135deg, #20808D 0%, #14b8a6 100%);
+  box-shadow: 0 0 20px rgba(32, 128, 141, 0.4);
+  transition: all 0.3s ease;
+}
+
+.glow-button:hover {
+  box-shadow: 0 0 40px rgba(32, 128, 141, 0.6);
+  transform: translateY(-2px);
+}
+
+.glow-button:active {
+  transform: translateY(0);
+}
+
+/* Severity badges */
+.badge-critical {
+  background: linear-gradient(135deg, #dc2626, #ef4444);
+  color: white;
+  animation: pulse 2s infinite;
+}
+
+.badge-high {
+  background: linear-gradient(135deg, #ea580c, #f97316);
+  color: white;
+}
+
+.badge-medium {
+  background: linear-gradient(135deg, #ca8a04, #eab308);
+  color: #1e293b;
+}
+
+.badge-low {
+  background: linear-gradient(135deg, #16a34a, #22c55e);
+  color: white;
+}
+
+/* Progress bar animation */
+@keyframes progress-shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.progress-bar {
+  background: linear-gradient(90deg, #20808D, #14b8a6, #20808D);
+  background-size: 200% 100%;
+  animation: progress-shimmer 2s linear infinite;
+}
+
+/* Pulse animation for alerts */
+@keyframes pulse-ring {
+  0% { transform: scale(0.8); opacity: 1; }
+  100% { transform: scale(2); opacity: 0; }
+}
+
+.pulse-ring {
+  animation: pulse-ring 1.5s cubic-bezier(0.215, 0.61, 0.355, 1) infinite;
+}
+
+/* Leaflet map adjustments */
+.leaflet-container {
+  background: #1e293b !important;
+  border-radius: 12px;
+}
+
+.leaflet-popup-content-wrapper {
+  background: rgba(30, 41, 59, 0.95);
+  color: #f1f5f9;
+  border-radius: 8px;
+}
+
+.leaflet-popup-tip {
+  background: rgba(30, 41, 59, 0.95);
+}
+
+/* Status indicator dots */
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  animation: pulse 2s infinite;
+}
+
+.status-dot.online {
+  background: #22c55e;
+  box-shadow: 0 0 8px #22c55e;
+}
+
+.status-dot.pending {
+  background: #eab308;
+  box-shadow: 0 0 8px #eab308;
+}
+
+.status-dot.offline {
+  background: #64748b;
+}

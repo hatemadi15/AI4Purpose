@@ -1,0 +1,73 @@
+{
+  "total": 21,
+  "elapsed": 1.8,
+  "sources": [
+    {
+      "source": "Google News",
+      "success": true,
+      "count": 10
+    },
+    {
+      "source": "MTV Lebanon",
+      "success": true,
+      "count": 5
+    },
+    {
+      "source": "Al Jadeed",
+      "success": true,
+      "count": 0
+    },
+    {
+      "source": "LBCI",
+      "success": true,
+      "count": 5
+    },
+    {
+      "source": "NNA Lebanon",
+      "success": true,
+      "count": 1
+    }
+  ],
+  "sample_titles": [
+    {
+      "source": "Google News (UNHCR - The UN Refugee Agency)",
+      "title": "UNHCR: almost 700,000 displaced in a week across Lebanon as crisis deepens"
+    },
+    {
+      "source": "Google News (Jurist.org)",
+      "title": "Israel mass evacuation orders in Lebanon fuel humanitarian crisis, says rights group"
+    },
+    {
+      "source": "Google News (International Rescue Committee)",
+      "title": "Lebanon crisis: What is happening and how to help"
+    },
+    {
+      "source": "Google News (Financial Times)",
+      "title": "Israel expects Lebanon offensive to outlast Iran conflict"
+    },
+    {
+      "source": "Google News (Hyperallergic)",
+      "title": "Lebanon Gallerist Navigates Ongoing Israeli Airstrikes"
+    },
+    {
+      "source": "Google News (Vatican News)",
+      "title": "Order of Malta Lebanon responds to renewed displacement crisis"
+    },
+    {
+      "source": "Google News (UN News)",
+      "title": "Nearly 700,000 displaced in Lebanon as Middle East crisis escalates"
+    },
+    {
+      "source": "Google News (MSN)",
+      "title": "Displacement of half a million in Lebanon a 'humanitarian crisis,' says former minister"
+    },
+    {
+      "source": "Google News (The New York Times)",
+      "title": "What to Know About Iran and the Widening Fighting in the Middle East"
+    },
+    {
+      "source": "Google News (The Jerusalem Post)",
+      "title": "Hezbollah to attack if Lebanese Army intervenes in conflict"
+    }
+  ]
+}
