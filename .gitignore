@@ -28,3 +28,5 @@ Thumbs.db
 # Testing
 test_output.txt
 test_apis.js
+backend/data
+backend/data/medalert.sqlite
