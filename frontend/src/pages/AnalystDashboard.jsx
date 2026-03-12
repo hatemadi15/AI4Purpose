@@ -145,7 +145,16 @@ function AnalystDashboard() {
     };
 
     const formatTime = (dateStr) => {
-        return new Date(dateStr).toLocaleString();
+        if (!dateStr) return 'N/A';
+        const d = new Date(dateStr);
+        return isNaN(d.getTime()) ? 'Invalid Date' : d.toLocaleString(undefined, {
+            year: 'numeric',
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit'
+        });
     };
 
     return (
@@ -198,7 +207,7 @@ function AnalystDashboard() {
                                 </div>
                                 <div className="text-white font-medium mb-1">{alert.event_type}</div>
                                 <div className="text-xs text-slate-400">{alert.region}</div>
-                                <div className="text-xs text-slate-500 mt-1">{formatTime(alert.created_at)}</div>
+                                <div className="text-xs text-slate-500 mt-1">{formatTime(alert.createdAt)}</div>
                             </button>
                         ))}
                     </div>

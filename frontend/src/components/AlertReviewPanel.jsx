@@ -140,7 +140,15 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
 
     const formatTime = (dateStr) => {
         if (!dateStr) return 'N/A';
-        return new Date(dateStr).toLocaleString();
+        const d = new Date(dateStr);
+        return isNaN(d.getTime()) ? 'Invalid Date' : d.toLocaleString(undefined, {
+            year: 'numeric',
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit'
+        });
     };
 
     if (!selectedAlert) {
@@ -208,6 +216,10 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
                     <div>
                         <div className="text-xs text-slate-400">Region</div>
                         <div className="text-white font-medium">{selectedAlert.region}</div>
+                    </div>
+                    <div>
+                        <div className="text-xs text-slate-400">Detected At</div>
+                        <div className="text-white font-medium">{formatTime(selectedAlert.createdAt)}</div>
                     </div>
                 </div>
             </div>
