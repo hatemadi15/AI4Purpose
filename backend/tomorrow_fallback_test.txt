@@ -1,0 +1,6 @@
+--- STARTING TOMORROW.IO FALLBACK TEST ---
+Success: true
+Is Demo: true
+Count: 2
+First Finding: HEATWAVE - (DEMO) Extreme heat detected: 38°C - API Fallback
+--- TEST COMPLETED ---

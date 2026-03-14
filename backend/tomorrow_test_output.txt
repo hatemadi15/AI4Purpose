@@ -1,0 +1,7 @@
+--- STARTING TOMORROW.IO TEST (UA SPOOF) ---
+Testing URL: https://api.tomorrow.io/v4/weather/forecast?location=42.3478,-71.0466&apikey=EMzZCdeSI8H4UcvxKTybjw5kqr1oUEj2
+EXCEPTION: Request failed with status code 403
+Status: 403
+Data Type: string
+Blocked by Cloudflare
+--- TEST COMPLETED ---
