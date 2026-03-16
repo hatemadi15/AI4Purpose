@@ -560,146 +560,162 @@ function getRegionKeywords(region) {
 }
 
 /**
- * Aggregate all intel findings from various sources
- * @param {Object} detectionData - Data from detection service
- * @param {Object} twitterIntel - Data from intel Twitter monitoring
- * @param {Object} ministryIntel - Data from Ministry Info API
+ * Aggregate all intel findings from named source results.
+ * @param {Object} options
+ * @param {string} options.region
+ * @param {Object<string, Object>} options.sourceResults
  * @returns {Object} Aggregated intel report
  */
-function aggregateIntel(detectionData, twitterIntel, ministryIntel, scrapedNews) {
+function aggregateIntel({ region, sourceResults = {} }) {
     const allFindings = [];
     const now = new Date();
 
-    // Process earthquake data
-    const earthquakes = [
-        ...(detectionData.detectionData?.[0]?.data || []),
-        ...(detectionData.detectionData?.[1]?.data || [])
-    ];
-
-    for (const eq of earthquakes) {
-        const time = eq.properties?.time ? new Date(eq.properties.time) : null;
-        if (time && isRecentIntel(time)) {
-            allFindings.push({
-                type: 'EARTHQUAKE',
-                source: eq.properties?.net === 'us' ? 'USGS' : 'EMSC',
-                source_type: 'seismic_sensor',
-                title: eq.properties?.place || 'Earthquake Detected',
-                magnitude: eq.properties?.mag || eq.properties?.magnitude,
-                location: {
-                    lat: eq.geometry?.coordinates?.[1],
-                    lon: eq.geometry?.coordinates?.[0],
-                    depth: eq.geometry?.coordinates?.[2]
-                },
-                posted_at: time.toISOString(),
-                fetched_at: now.toISOString(),
-                severity: getMagnitudeSeverity(eq.properties?.mag || eq.properties?.magnitude),
-                raw: eq
-            });
+    for (const [sourceId, result] of Object.entries(sourceResults)) {
+        if (!result?.success) {
+            continue;
         }
-    }
 
-    // Process weather alerts
-    const weatherAlerts = [
-        ...(detectionData.detectionData?.[2]?.data || []),
-        ...(detectionData.detectionData?.[3]?.data || [])
-    ];
-
-    for (const alert of weatherAlerts) {
-        allFindings.push({
-            type: alert.event || alert.type || 'WEATHER_ALERT',
-            source: 'Weather Services',
-            source_type: 'weather_sensor',
-            title: alert.headline || alert.event || 'Weather Alert',
-            description: alert.description,
-            posted_at: alert.onset || now.toISOString(),
-            fetched_at: now.toISOString(),
-            severity: alert.severity || 'MEDIUM',
-            raw: alert
-        });
-    }
-
-    // Process news articles
-    const newsArticles = detectionData.detectionData?.[4]?.data || [];
-    for (const article of newsArticles) {
-        const publishTime = article.dateTime || article.publishedAt;
-        if (publishTime && isRecentIntel(publishTime)) {
-            allFindings.push({
-                type: detectEventType(article.title),
-                source: article.source?.name || article.source?.title || 'News',
-                source_type: 'news',
-                title: article.title,
-                description: article.body || article.description,
-                url: article.url,
-                posted_at: publishTime,
-                fetched_at: now.toISOString(),
-                severity: 'UNCONFIRMED',
-                raw: article
-            });
+        if (sourceId === 'usgs' || sourceId === 'emsc') {
+            for (const eq of result.data || []) {
+                const time = eq.properties?.time ? new Date(eq.properties.time) : null;
+                if (time && isRecentIntel(time)) {
+                    allFindings.push({
+                        type: 'EARTHQUAKE',
+                        source: eq.properties?.net === 'us' ? 'USGS' : 'EMSC',
+                        source_type: 'seismic_sensor',
+                        title: eq.properties?.place || 'Earthquake Detected',
+                        magnitude: eq.properties?.mag || eq.properties?.magnitude,
+                        location: {
+                            lat: eq.geometry?.coordinates?.[1],
+                            lon: eq.geometry?.coordinates?.[0],
+                            depth: eq.geometry?.coordinates?.[2]
+                        },
+                        posted_at: time.toISOString(),
+                        fetched_at: now.toISOString(),
+                        severity: getMagnitudeSeverity(eq.properties?.mag || eq.properties?.magnitude),
+                        raw: eq
+                    });
+                }
+            }
+            continue;
         }
-    }
 
-    // Process intel Twitter findings
-    if (twitterIntel?.findings) {
-        for (const tweet of twitterIntel.findings) {
-            const relevance = typeof tweet.relevance === 'number' ? tweet.relevance : null;
-            const severityFromRelevance = relevance === null
-                ? null
-                : (relevance >= 3 ? 'HIGH' : relevance >= 2 ? 'MEDIUM' : 'LOW');
-
-            allFindings.push({
-                type: detectEventType(tweet.text),
-                source: tweet.source,
-                source_type: tweet.source_type || 'intel_twitter',
-                source_handle: tweet.source_handle,
-                title: tweet.text.substring(0, 100) + (tweet.text.length > 100 ? '...' : ''),
-                description: tweet.text,
-                url: tweet.url,
-                posted_at: tweet.posted_at,
-                fetched_at: tweet.fetched_at,
-                severity: tweet.severity || severityFromRelevance || (tweet.is_trusted_source ? 'MEDIUM' : 'LOW'),
-                keywords: tweet.keywords,
-                metrics: tweet.metrics,
-                raw: tweet
-            });
+        if (sourceId === 'openweather' || sourceId === 'tomorrow_io') {
+            for (const alert of result.data || []) {
+                allFindings.push({
+                    type: alert.event || alert.type || 'WEATHER_ALERT',
+                    source: result.source || 'Weather Services',
+                    source_type: 'weather_sensor',
+                    title: alert.headline || alert.event || 'Weather Alert',
+                    description: alert.description,
+                    posted_at: alert.onset || now.toISOString(),
+                    fetched_at: now.toISOString(),
+                    severity: alert.severity || 'MEDIUM',
+                    raw: alert
+                });
+            }
+            continue;
         }
-    }
 
-    // Process Ministry Alerts
-    if (ministryIntel?.data) {
-        for (const ministryAlert of ministryIntel.data) {
-            allFindings.push({
-                type: ministryAlert.type || 'OFFICIAL_STATEMENT',
-                source: ministryAlert.source,
-                source_type: 'ministry_alert',
-                title: ministryAlert.title,
-                description: ministryAlert.description,
-                url: ministryAlert.url,
-                posted_at: ministryAlert.posted_at,
-                fetched_at: now.toISOString(),
-                severity: ministryAlert.severity || 'MEDIUM',
-                raw: ministryAlert
-            });
+        if (sourceId === 'newsapi_ai') {
+            for (const article of result.data || []) {
+                const publishTime = article.dateTime || article.publishedAt;
+                if (publishTime && isRecentIntel(publishTime)) {
+                    allFindings.push({
+                        type: detectEventType(article.title),
+                        source: article.source?.name || article.source?.title || 'News',
+                        source_type: 'news',
+                        title: article.title,
+                        description: article.body || article.description,
+                        url: article.url,
+                        posted_at: publishTime,
+                        fetched_at: now.toISOString(),
+                        severity: 'UNCONFIRMED',
+                        raw: article
+                    });
+                }
+            }
+            continue;
         }
-    }
 
-    // Process scraped news findings (Google News, MTV, LBCI, Al Jadeed, NNA)
-    if (scrapedNews?.findings) {
-        for (const finding of scrapedNews.findings) {
-            allFindings.push({
-                type: detectEventType(finding.title),
-                source: finding.source,
-                source_type: finding.source_type || 'web_scraper',
-                title: finding.title,
-                description: finding.description,
-                url: finding.url,
-                posted_at: finding.posted_at,
-                fetched_at: finding.fetched_at || now.toISOString(),
-                severity: 'UNCONFIRMED',
-                language: finding.language,
-                raw: finding
-            });
+        if (sourceId === 'twitter_x') {
+            for (const tweet of result.data || []) {
+                allFindings.push({
+                    type: detectEventType(tweet.text),
+                    source: 'Twitter/X',
+                    source_type: 'public_twitter',
+                    title: tweet.text?.substring(0, 100) || 'Twitter mention',
+                    description: tweet.text,
+                    posted_at: tweet.created_at,
+                    fetched_at: now.toISOString(),
+                    severity: 'UNCONFIRMED',
+                    raw: tweet
+                });
+            }
+            continue;
         }
-        console.log(`[Aggregate] Added ${scrapedNews.findings.length} scraped news findings`);
+
+        if (sourceId === 'intel_twitter') {
+            for (const tweet of result.findings || []) {
+                const relevance = typeof tweet.relevance === 'number' ? tweet.relevance : null;
+                const severityFromRelevance = relevance === null
+                    ? null
+                    : (relevance >= 3 ? 'HIGH' : relevance >= 2 ? 'MEDIUM' : 'LOW');
+
+                allFindings.push({
+                    type: detectEventType(tweet.text),
+                    source: tweet.source,
+                    source_type: tweet.source_type || 'intel_twitter',
+                    source_handle: tweet.source_handle,
+                    title: tweet.text.substring(0, 100) + (tweet.text.length > 100 ? '...' : ''),
+                    description: tweet.text,
+                    url: tweet.url,
+                    posted_at: tweet.posted_at,
+                    fetched_at: tweet.fetched_at,
+                    severity: tweet.severity || severityFromRelevance || (tweet.is_trusted_source ? 'MEDIUM' : 'LOW'),
+                    keywords: tweet.keywords,
+                    metrics: tweet.metrics,
+                    raw: tweet
+                });
+            }
+            continue;
+        }
+
+        if (sourceId === 'ministry_info') {
+            for (const ministryAlert of result.data || []) {
+                allFindings.push({
+                    type: ministryAlert.type || 'OFFICIAL_STATEMENT',
+                    source: ministryAlert.source,
+                    source_type: 'ministry_alert',
+                    title: ministryAlert.title,
+                    description: ministryAlert.description,
+                    url: ministryAlert.url,
+                    posted_at: ministryAlert.posted_at,
+                    fetched_at: now.toISOString(),
+                    severity: ministryAlert.severity || 'MEDIUM',
+                    raw: ministryAlert
+                });
+            }
+            continue;
+        }
+
+        if (['google_news', 'mtv_lebanon', 'al_jadeed', 'lbci', 'nna_lebanon'].includes(sourceId)) {
+            for (const finding of result.findings || []) {
+                allFindings.push({
+                    type: detectEventType(finding.title),
+                    source: finding.source,
+                    source_type: finding.source_type || 'web_scraper',
+                    title: finding.title,
+                    description: finding.description,
+                    url: finding.url,
+                    posted_at: finding.posted_at,
+                    fetched_at: finding.fetched_at || now.toISOString(),
+                    severity: 'UNCONFIRMED',
+                    language: finding.language,
+                    raw: finding
+                });
+            }
+        }
     }
 
     // Sort by posted time (most recent first)
@@ -710,7 +726,7 @@ function aggregateIntel(detectionData, twitterIntel, ministryIntel, scrapedNews)
 
     return {
         timestamp: now.toISOString(),
-        region: detectionData.region,
+        region,
         total_findings: allFindings.length,
         findings: allFindings,
         sources,
@@ -719,6 +735,8 @@ function aggregateIntel(detectionData, twitterIntel, ministryIntel, scrapedNews)
             weather: allFindings.filter(f => f.source_type === 'weather_sensor').length,
             news: allFindings.filter(f => f.source_type === 'news').length,
             intel_twitter: allFindings.filter(f => f.source_type === 'intel_twitter').length,
+            public_twitter: allFindings.filter(f => f.source_type === 'public_twitter').length,
+            ministry_alert: allFindings.filter(f => f.source_type === 'ministry_alert').length,
             web_scraper: allFindings.filter(f => f.source_type === 'web_scraper').length
         },
         oldest_finding: allFindings[allFindings.length - 1]?.posted_at,

@@ -265,46 +265,56 @@ async function scrapeNNA() {
     }
 }
 
+const NEWS_SCRAPER_REGISTRY = {
+    google_news: { label: 'Google News', execute: (region) => scrapeGoogleNews(region) },
+    mtv_lebanon: { label: 'MTV Lebanon', execute: () => scrapeMTV() },
+    al_jadeed: { label: 'Al Jadeed', execute: () => scrapeAlJadeed() },
+    lbci: { label: 'LBCI', execute: () => scrapeLBCI() },
+    nna_lebanon: { label: 'NNA Lebanon', execute: () => scrapeNNA() }
+};
+
 // ─── Master: Scrape All News Sources ─────────────────────────────────────────
 
-async function scrapeAllNews(region = 'Lebanon') {
+async function scrapeAllNews(region = 'Lebanon', sourceIds = Object.keys(NEWS_SCRAPER_REGISTRY), runnerMap = NEWS_SCRAPER_REGISTRY) {
     console.log(`\n[Scraper] ═══════════════════════════════════════════════════════`);
     console.log(`[Scraper] Starting scrape of all Lebanese news sources...`);
     console.log(`[Scraper] Region: ${region} | Window: last 5 minutes`);
     console.log(`[Scraper] ═══════════════════════════════════════════════════════\n`);
 
     const startTime = Date.now();
-
-    const results = await Promise.allSettled([
-        scrapeGoogleNews(region),
-        scrapeMTV(),
-        scrapeAlJadeed(),
-        scrapeLBCI(),
-        scrapeNNA()
-    ]);
-
-    const scraperNames = ['Google News', 'MTV Lebanon', 'Al Jadeed', 'LBCI', 'NNA Lebanon'];
+    const selectedSourceIds = [...new Set((sourceIds || []).filter((id) => runnerMap[id]))];
+    const results = await Promise.allSettled(selectedSourceIds.map((sourceId) => runnerMap[sourceId].execute(region)));
     const allFindings = [];
     const sourceResults = [];
+    const resultsBySourceId = {};
 
     results.forEach((result, index) => {
-        const name = scraperNames[index];
+        const sourceId = selectedSourceIds[index];
+        const name = runnerMap[sourceId].label;
         if (result.status === 'fulfilled' && result.value.success) {
             const r = result.value;
             console.log(`[Scraper] ✅ ${name}: ${r.count} articles found`);
             allFindings.push(...r.findings);
-            sourceResults.push({ source: name, success: true, count: r.count });
+            sourceResults.push({ id: sourceId, source: name, success: true, count: r.count });
+            resultsBySourceId[sourceId] = r;
         } else {
             const error = result.status === 'rejected' ? result.reason?.message : result.value?.error;
             console.log(`[Scraper] ❌ ${name}: failed - ${error}`);
-            sourceResults.push({ source: name, success: false, error });
+            sourceResults.push({ id: sourceId, source: name, success: false, error });
+            resultsBySourceId[sourceId] = {
+                source: name,
+                success: false,
+                error,
+                findings: [],
+                count: 0
+            };
         }
     });
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log(`\n[Scraper] ═══════════════════════════════════════════════════════`);
     console.log(`[Scraper] Scraping complete in ${elapsed}s`);
-    console.log(`[Scraper] Total articles: ${allFindings.length} from ${sourceResults.filter(s => s.success).length}/${scraperNames.length} sources`);
+    console.log(`[Scraper] Total articles: ${allFindings.length} from ${sourceResults.filter(s => s.success).length}/${selectedSourceIds.length} sources`);
     console.log(`[Scraper] ═══════════════════════════════════════════════════════\n`);
 
     return {
@@ -313,11 +323,13 @@ async function scrapeAllNews(region = 'Lebanon') {
         findings: allFindings,
         count: allFindings.length,
         sources: sourceResults,
-        elapsed_seconds: parseFloat(elapsed)
+        elapsed_seconds: parseFloat(elapsed),
+        resultsBySourceId
     };
 }
 
 module.exports = {
+    NEWS_SCRAPER_REGISTRY,
     scrapeAllNews,
     scrapeGoogleNews,
     scrapeMTV,

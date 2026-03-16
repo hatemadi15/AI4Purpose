@@ -8,25 +8,25 @@ function AlertMap({ lat, lon, radius, severity = 'MEDIUM' }) {
     useEffect(() => {
         if (!mapRef.current) return;
 
-        // Initialize map if not already done
         if (!mapInstance.current) {
-            mapInstance.current = L.map(mapRef.current).setView([lat, lon], 10);
+            mapInstance.current = L.map(mapRef.current, {
+                zoomControl: true
+            }).setView([lat, lon], 10);
 
             L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                attribution: '© OpenStreetMap contributors'
+                attribution: '&copy; OpenStreetMap contributors',
+                maxZoom: 20
             }).addTo(mapInstance.current);
         } else {
             mapInstance.current.setView([lat, lon], 10);
         }
 
-        // Clear existing layers
-        mapInstance.current.eachLayer(layer => {
+        mapInstance.current.eachLayer((layer) => {
             if (layer instanceof L.Circle || layer instanceof L.Marker) {
                 mapInstance.current.removeLayer(layer);
             }
         });
 
-        // Severity multiplier
         const multiplier = {
             LOW: 1.0,
             MEDIUM: 1.5,
@@ -39,78 +39,75 @@ function AlertMap({ lat, lon, radius, severity = 'MEDIUM' }) {
         const warningRadius = (adjustedRadius / 3) * 2;
         const watchRadius = adjustedRadius;
 
-        // Add radius circles
-        // Watch zone (outer)
         L.circle([lat, lon], {
             radius: watchRadius * 1000,
-            color: '#eab308',
-            fillColor: '#eab308',
-            fillOpacity: 0.1,
-            weight: 2,
-            dashArray: '5, 5'
-        }).addTo(mapInstance.current).bindPopup('Watch Zone');
+            color: '#d3b15d',
+            fillColor: '#d3b15d',
+            fillOpacity: 0.08,
+            weight: 1.5,
+            dashArray: '5 5'
+        }).addTo(mapInstance.current).bindPopup('Watch zone');
 
-        // Warning zone (middle)
         L.circle([lat, lon], {
             radius: warningRadius * 1000,
-            color: '#f97316',
-            fillColor: '#f97316',
-            fillOpacity: 0.15,
-            weight: 2,
-            dashArray: '5, 5'
-        }).addTo(mapInstance.current).bindPopup('Warning Zone');
+            color: '#d98a54',
+            fillColor: '#d98a54',
+            fillOpacity: 0.12,
+            weight: 1.5,
+            dashArray: '4 4'
+        }).addTo(mapInstance.current).bindPopup('Warning zone');
 
-        // Critical zone (inner)
         L.circle([lat, lon], {
             radius: criticalRadius * 1000,
-            color: '#ef4444',
-            fillColor: '#ef4444',
-            fillOpacity: 0.2,
+            color: '#d96666',
+            fillColor: '#d96666',
+            fillOpacity: 0.16,
             weight: 2
-        }).addTo(mapInstance.current).bindPopup('Critical Zone');
+        }).addTo(mapInstance.current).bindPopup('Critical zone');
 
-        // Add epicenter marker
         const epicenterIcon = L.divIcon({
             className: 'custom-marker',
             html: `
-        <div style="
-          width: 24px;
-          height: 24px;
-          background: #ef4444;
-          border: 3px solid white;
-          border-radius: 50%;
-          box-shadow: 0 0 10px rgba(239, 68, 68, 0.5);
-          animation: pulse 2s infinite;
-        "></div>
-      `,
-            iconSize: [24, 24],
-            iconAnchor: [12, 12]
+                <div style="
+                    width: 18px;
+                    height: 18px;
+                    border-radius: 999px;
+                    background: #6fd6df;
+                    border: 3px solid rgba(5, 8, 13, 0.95);
+                    box-shadow: 0 0 0 4px rgba(111, 214, 223, 0.18);
+                "></div>
+            `,
+            iconSize: [18, 18],
+            iconAnchor: [9, 9]
         });
 
         L.marker([lat, lon], { icon: epicenterIcon })
             .addTo(mapInstance.current)
             .bindPopup(`
-        <strong>Epicenter</strong><br>
-        Lat: ${lat.toFixed(4)}<br>
-        Lon: ${lon.toFixed(4)}
-      `);
+                <strong>Incident center</strong><br>
+                Lat: ${lat.toFixed(4)}<br>
+                Lon: ${lon.toFixed(4)}
+            `);
 
-        // Fit bounds to show all circles
         mapInstance.current.fitBounds([
             [lat - (watchRadius / 111), lon - (watchRadius / 111)],
             [lat + (watchRadius / 111), lon + (watchRadius / 111)]
         ]);
-
-        return () => {
-            // Cleanup handled by React
-        };
     }, [lat, lon, radius, severity]);
+
+    useEffect(() => (
+        () => {
+            if (mapInstance.current) {
+                mapInstance.current.remove();
+                mapInstance.current = null;
+            }
+        }
+    ), []);
 
     return (
         <div
             ref={mapRef}
-            className="w-full h-full min-h-[250px] rounded-xl"
-            style={{ background: '#1e293b' }}
+            className="h-full min-h-[280px] w-full rounded-2xl"
         />
     );
 }

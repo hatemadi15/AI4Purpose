@@ -1,4 +1,5 @@
-require('dotenv').config();
+const { loadBackendEnv } = require('./config/runtime');
+loadBackendEnv();
 const express = require('express');
 const cors = require('cors');
 const http = require('http');

@@ -1,6 +1,10 @@
 import { useState, useEffect } from 'react';
-import { approveAlert, rejectAlert, verifyAlert } from '../services/api';
+import { approveAlert, getSourceConfig, rejectAlert, verifyAlert } from '../services/api';
 import AlertMap from './AlertMap';
+import SourceSelector from './SourceSelector';
+import SystemIcon from './SystemIcon';
+
+const MESSAGE_OPTIONS = ['concise', 'detailed', 'technical'];
 
 function SeverityBadge({ severity }) {
     const classes = {
@@ -10,11 +14,173 @@ function SeverityBadge({ severity }) {
         LOW: 'badge-low'
     };
 
+    return <span className={classes[severity] || classes.MEDIUM}>{severity}</span>;
+}
+
+function VerificationStatusPill({ status }) {
+    const tone = {
+        VERIFIED: 'border-emerald-400/25 bg-emerald-400/10 text-emerald-100',
+        DISPUTED: 'border-red-400/25 bg-red-400/10 text-red-100',
+        VERIFYING: 'border-amber-400/25 bg-amber-400/10 text-amber-100',
+        UNVERIFIED: 'border-slate-700 bg-slate-950/60 text-slate-300'
+    };
+
+    const label = status || 'UNVERIFIED';
+
     return (
-        <span className={`px-2 py-1 rounded-full text-xs font-bold ${classes[severity] || classes.MEDIUM}`}>
-            {severity}
+        <span className={`rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] ${tone[label] || tone.UNVERIFIED}`}>
+            {label.replace(/_/g, ' ')}
         </span>
     );
+}
+
+function StatCard({ label, value, footnote }) {
+    return (
+        <div className="metric-card">
+            <div className="metric-label">{label}</div>
+            <div className="mt-3 text-base font-semibold text-slate-100">{value}</div>
+            {footnote && <div className="mt-1 text-xs text-slate-500">{footnote}</div>}
+        </div>
+    );
+}
+
+function SourceListCard({ icon, title, count, status, children }) {
+    return (
+        <details className="rounded-2xl border border-slate-800 bg-slate-950/45 p-4">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                    <div className="flex h-9 w-9 items-center justify-center rounded-xl border border-slate-800 bg-slate-950/70">
+                        <SystemIcon name={icon} className="h-4 w-4 text-slate-300" />
+                    </div>
+                    <div>
+                        <div className="text-sm font-semibold text-slate-100">{title}</div>
+                        <div className="text-xs text-slate-500">{count}</div>
+                    </div>
+                </div>
+                <div className="text-xs uppercase tracking-[0.16em] text-slate-500">{status}</div>
+            </summary>
+            <div className="mt-4 space-y-2">{children}</div>
+        </details>
+    );
+}
+
+function SourceRow({ href, title, meta, body, status }) {
+    const Wrapper = href ? 'a' : 'div';
+    const props = href ? { href, target: '_blank', rel: 'noopener noreferrer' } : {};
+    const tone = status === 'confirmed'
+        ? 'text-emerald-300'
+        : status === 'rejected'
+            ? 'text-red-300'
+            : 'text-slate-300';
+
+    return (
+        <Wrapper
+            {...props}
+            className="block rounded-xl border border-slate-800 bg-slate-950/70 p-3 transition-colors hover:border-slate-700"
+        >
+            <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                        <div className="text-xs font-semibold text-slate-100">{title}</div>
+                        {href && <SystemIcon name="link" className="h-3.5 w-3.5 text-cyan-200" />}
+                    </div>
+                    {meta && <div className="mt-1 text-[11px] text-slate-500">{meta}</div>}
+                    {body && <div className="mt-2 text-xs leading-5 text-slate-400">{body}</div>}
+                </div>
+                {status && (
+                    <div className={`text-[10px] font-semibold uppercase tracking-[0.16em] ${tone}`}>
+                        {status}
+                    </div>
+                )}
+            </div>
+        </Wrapper>
+    );
+}
+
+function formatTime(dateStr) {
+    if (!dateStr) return 'N/A';
+
+    const d = new Date(dateStr);
+    if (Number.isNaN(d.getTime())) return 'Invalid timestamp';
+
+    return d.toLocaleString(undefined, {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+    });
+}
+
+function formatCoordinates(lat, lon) {
+    if (lat == null || lon == null) return 'Unavailable';
+
+    const parsedLat = parseFloat(lat);
+    const parsedLon = parseFloat(lon);
+    if (Number.isNaN(parsedLat) || Number.isNaN(parsedLon)) return 'Unavailable';
+
+    return `${parsedLat.toFixed(4)}, ${parsedLon.toFixed(4)}`;
+}
+
+function getAlertPrimaryLabel(alert) {
+    const finding = alert?.detection_data?.finding || alert?.all_intel_findings?.finding;
+
+    return (
+        finding?.title
+        || finding?.headline
+        || finding?.description
+        || alert?.custom_message
+        || alert?.event_type
+        || 'Alert'
+    );
+}
+
+function getAlertCategoryLabel(alert) {
+    return alert?.event_type?.replace(/_/g, ' ') || 'Alert';
+}
+
+function escapeRegExp(value) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function getMessagePreview(message, alert, language = 'en') {
+    if (!message) return '';
+
+    const primary = getAlertPrimaryLabel(alert);
+    const category = alert?.event_type;
+    const categoryLabel = getAlertCategoryLabel(alert);
+
+    if (!primary || !category || primary === category || primary === categoryLabel) {
+        return message;
+    }
+
+    const normalizedPrimary = primary.trim().replace(/\s+/g, ' ');
+    let preview = message;
+
+    if (language === 'en') {
+        preview = preview.replace(
+            new RegExp(`\\b${escapeRegExp(categoryLabel)}\\s+detected\\s+in\\s+your\\s+area\\b`, 'i'),
+            normalizedPrimary
+        );
+        preview = preview.replace(
+            new RegExp(`\\b${escapeRegExp(category)}\\s+detected\\s+in\\s+your\\s+area\\b`, 'i'),
+            normalizedPrimary
+        );
+    } else if (language === 'ar') {
+        preview = preview.replace(
+            new RegExp(`تم\\s+اكتشاف\\s+${escapeRegExp(categoryLabel)}\\s+في\\s+منطقتك`, 'i'),
+            normalizedPrimary
+        );
+        preview = preview.replace(
+            new RegExp(`تم\\s+اكتشاف\\s+${escapeRegExp(category)}\\s+في\\s+منطقتك`, 'i'),
+            normalizedPrimary
+        );
+    }
+
+    preview = preview.replace(new RegExp(`\\b${escapeRegExp(categoryLabel)}\\b`, 'g'), normalizedPrimary);
+    preview = preview.replace(new RegExp(`\\b${escapeRegExp(category)}\\b`, 'g'), normalizedPrimary);
+
+    return preview;
 }
 
 function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelection }) {
@@ -25,8 +191,38 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
     const [customMessage, setCustomMessage] = useState('');
     const [analystNotes, setAnalystNotes] = useState('');
     const [approvalStatus, setApprovalStatus] = useState(null);
+    const [verificationProviders, setVerificationProviders] = useState([]);
+    const [selectedVerificationSourceIds, setSelectedVerificationSourceIds] = useState([]);
+    const [sourceConfigLoaded, setSourceConfigLoaded] = useState(false);
+    const [sourceConfigError, setSourceConfigError] = useState(null);
 
-    // Reset local state when a different alert is selected
+    useEffect(() => {
+        let active = true;
+
+        const loadSourceConfig = async () => {
+            try {
+                const response = await getSourceConfig();
+                if (!active) return;
+
+                const providers = response.data?.verification?.providers || [];
+                setVerificationProviders(providers);
+                setSelectedVerificationSourceIds(providers.filter((provider) => provider.default_enabled).map((provider) => provider.id));
+                setSourceConfigLoaded(true);
+                setSourceConfigError(null);
+            } catch (err) {
+                if (!active) return;
+                setSourceConfigLoaded(false);
+                setSourceConfigError(err.response?.data?.error || err.message);
+            }
+        };
+
+        loadSourceConfig();
+
+        return () => {
+            active = false;
+        };
+    }, []);
+
     useEffect(() => {
         setApprovalStatus(null);
         setCustomMessage('');
@@ -34,16 +230,23 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
         setVerifying(false);
         setVerificationStep('');
 
+        if (verificationProviders.length > 0) {
+            setSelectedVerificationSourceIds(
+                verificationProviders
+                    .filter((provider) => provider.default_enabled)
+                    .map((provider) => provider.id)
+            );
+        }
+
         if (selectedAlert?.selected_message_option === 'custom') {
             setCustomMessage(selectedAlert.custom_message || '');
         } else if (selectedAlert?.selected_message_option) {
             setSelectedOption(selectedAlert.selected_message_option);
         }
-    }, [selectedAlert?.id]);
+    }, [selectedAlert?.id, verificationProviders]);
 
-    // Socket listener for verification progress
     useEffect(() => {
-        if (!socket || !selectedAlert) return;
+        if (!socket || !selectedAlert) return undefined;
 
         const handleVerificationProgress = (data) => {
             if (String(data.alertId) === String(selectedAlert.id)) {
@@ -52,32 +255,38 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
         };
 
         const handleVerificationComplete = (data) => {
-            if (String(data.alertId) === String(selectedAlert.id)) {
-                setVerifying(false);
-                setVerificationStep('');
-                if (onAlertUpdated) {
-                    if (data.alert) {
-                        onAlertUpdated(data.alert);
-                    } else {
-                        const merged = { ...selectedAlert, ...data };
-                        if (!merged.verification_data && data.data) {
-                            merged.verification_data = data.data;
-                        }
-                        if (merged.verification_score == null && data.score != null) {
-                            merged.verification_score = data.score;
-                        }
-                        if (data.data?.corroboration) {
-                            if (merged.sources_checked == null) {
-                                merged.sources_checked = data.data.corroboration.total_sources_checked;
-                            }
-                            if (merged.sources_confirmed == null) {
-                                merged.sources_confirmed = data.data.corroboration.sources_corroborating;
-                            }
-                        }
-                        onAlertUpdated(merged);
-                    }
+            if (String(data.alertId) !== String(selectedAlert.id)) {
+                return;
+            }
+
+            setVerifying(false);
+            setVerificationStep('');
+
+            if (!onAlertUpdated) {
+                return;
+            }
+
+            if (data.alert) {
+                onAlertUpdated(data.alert);
+                return;
+            }
+
+            const merged = { ...selectedAlert, ...data };
+            if (!merged.verification_data && data.data) {
+                merged.verification_data = data.data;
+            }
+            if (merged.verification_score == null && data.score != null) {
+                merged.verification_score = data.score;
+            }
+            if (data.data?.corroboration) {
+                if (merged.sources_checked == null) {
+                    merged.sources_checked = data.data.corroboration.total_sources_checked;
+                }
+                if (merged.sources_confirmed == null) {
+                    merged.sources_confirmed = data.data.corroboration.sources_corroborating;
                 }
             }
+            onAlertUpdated(merged);
         };
 
         socket.on('verification_progress', handleVerificationProgress);
@@ -89,18 +298,30 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
         };
     }, [socket, selectedAlert, onAlertUpdated]);
 
-
     const handleVerify = async () => {
         if (!selectedAlert) return;
+
         setVerifying(true);
         setVerificationStep('Initializing verification...');
+
         try {
-            await verifyAlert(selectedAlert.id);
+            await verifyAlert(
+                selectedAlert.id,
+                sourceConfigLoaded ? selectedVerificationSourceIds : undefined
+            );
         } catch (err) {
             console.error('Verification failed:', err);
             setVerifying(false);
-            setVerificationStep('Verification failed. Try again.');
+            setVerificationStep('Verification failed');
         }
+    };
+
+    const toggleVerificationSource = (sourceId) => {
+        setSelectedVerificationSourceIds((current) => (
+            current.includes(sourceId)
+                ? current.filter((id) => id !== sourceId)
+                : [...current, sourceId]
+        ));
     };
 
     const handleApprove = async () => {
@@ -116,7 +337,6 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
                 analyst_notes: analystNotes,
                 analyst_name: 'Demo Analyst'
             });
-            // Dashboard socket listener will handle the success/removal
         } catch (err) {
             setApprovalStatus({ status: 'error', message: err.response?.data?.error || err.message });
         } finally {
@@ -132,32 +352,22 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
                 analyst_notes: analystNotes,
                 analyst_name: 'Demo Analyst'
             });
-            // Dashboard socket listener will handle the removal
         } catch (err) {
             console.error('Reject failed:', err);
         }
     };
 
-    const formatTime = (dateStr) => {
-        if (!dateStr) return 'N/A';
-        const d = new Date(dateStr);
-        return isNaN(d.getTime()) ? 'Invalid Date' : d.toLocaleString(undefined, {
-            year: 'numeric',
-            month: 'short',
-            day: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit'
-        });
-    };
-
     if (!selectedAlert) {
         return (
-            <div className="h-full flex items-center justify-center">
-                <div className="text-center">
-                    <div className="text-6xl mb-4">📋</div>
-                    <h3 className="text-xl font-semibold text-white mb-2">Select an Alert to Review</h3>
-                    <p className="text-slate-400">Click on an alert from the queue to view details</p>
+            <div className="flex h-full items-center justify-center">
+                <div className="max-w-md text-center">
+                    <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full border border-slate-800 bg-slate-950/60">
+                        <SystemIcon name="queue" className="h-7 w-7 text-slate-600" />
+                    </div>
+                    <h3 className="mt-5 text-xl font-semibold text-slate-100">Select an Alert to Review</h3>
+                    <p className="mt-2 text-sm leading-6 text-slate-500">
+                        Click on an alert from the queue to view details
+                    </p>
                 </div>
             </div>
         );
@@ -167,428 +377,447 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
     const verificationScore = selectedAlert.verification_score ?? selectedAlert.score;
     const sourcesConfirmed = selectedAlert.sources_confirmed ?? verificationData?.corroboration?.sources_corroborating ?? 0;
     const sourcesChecked = selectedAlert.sources_checked ?? verificationData?.corroboration?.total_sources_checked ?? 0;
+    const verificationSourceSelection = verificationData?.source_selection;
+    const verificationState = selectedAlert.verification_status || 'UNVERIFIED';
+    const verificationInFlight = verifying || verificationState === 'VERIFYING';
+    const canStartVerification = !verificationInFlight && (!selectedAlert.verification_status || selectedAlert.verification_status === 'UNVERIFIED');
+    const totalRecipients = (selectedAlert.affected_users_count?.critical || 0)
+        + (selectedAlert.affected_users_count?.warning || 0)
+        + (selectedAlert.affected_users_count?.watch || 0);
+
+    const credibility = verificationData?.gemini?.overall_credibility;
+    const credibilityTone = credibility === 'high'
+        ? 'text-emerald-300'
+        : credibility === 'medium'
+            ? 'text-amber-300'
+            : credibility === 'low'
+                ? 'text-red-300'
+                : 'text-slate-400';
+
+    const confidenceTone = verificationScore >= 70
+        ? 'border-emerald-400/25 bg-emerald-400/10 text-emerald-100'
+        : verificationScore >= 40
+            ? 'border-amber-400/25 bg-amber-400/10 text-amber-100'
+            : 'border-red-400/25 bg-red-400/10 text-red-100';
+
+    const socialSources = verificationData?.twitter_summary?.sources || [];
+    const socialSamples = verificationData?.twitter_summary?.samples || [];
+    const newsSources = verificationData?.news_summary?.sources || [];
+    const webSources = verificationData?.web_search?.sources || [];
+    const modelSources = verificationData?.perplexity?.key_sources || [];
+    const primaryLabel = getAlertPrimaryLabel(selectedAlert);
+    const categoryLabel = getAlertCategoryLabel(selectedAlert);
 
     return (
         <div className="space-y-6">
-            {/* Alert Header */}
-            <div className="flex items-start justify-between">
-                <div>
-                    <div className="flex items-center gap-3 mb-2">
-                        <h2 className="text-2xl font-bold text-white">{selectedAlert.event_type}</h2>
-                        <SeverityBadge severity={selectedAlert.severity} />
+            <section className="panel p-6">
+                <div className="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
+                    <div className="min-w-0 flex-1">
+                        <div className="mt-3 flex flex-wrap items-center gap-3">
+                            <h2 className="text-2xl font-semibold text-slate-50">{primaryLabel}</h2>
+                            <SeverityBadge severity={selectedAlert.severity} />
+                            <VerificationStatusPill status={verificationState} />
+                        </div>
+                        {categoryLabel && primaryLabel !== categoryLabel && (
+                            <div className="mt-2 text-xs uppercase tracking-[0.16em] text-slate-500">
+                                {categoryLabel}
+                            </div>
+                        )}
+                        <div className="mt-3 flex flex-wrap items-center gap-4 text-sm text-slate-400">
+                            <span className="inline-flex items-center gap-2">
+                                <SystemIcon name="map" className="h-4 w-4" />
+                                Region: {selectedAlert.region}
+                            </span>
+                            <span className="inline-flex items-center gap-2">
+                                <SystemIcon name="pin" className="h-4 w-4" />
+                                Location: {formatCoordinates(selectedAlert.lat, selectedAlert.lon)}
+                            </span>
+                            <span className="inline-flex items-center gap-2">
+                                <SystemIcon name="clock" className="h-4 w-4" />
+                                Detected At: {formatTime(selectedAlert.createdAt)}
+                            </span>
+                        </div>
                     </div>
-                    <p className="text-slate-400">
-                        Location: {parseFloat(selectedAlert.lat).toFixed(4)}°N, {parseFloat(selectedAlert.lon).toFixed(4)}°E
-                    </p>
-                </div>
-                <div className="text-right">
-                    <div className="text-sm text-slate-400">Affected Users</div>
-                    <div className="flex gap-2 mt-1">
-                        <span className="px-2 py-1 bg-red-500/20 text-red-400 rounded text-xs">
-                            {selectedAlert.affected_users_count?.critical || 0} Critical
-                        </span>
-                        <span className="px-2 py-1 bg-orange-500/20 text-orange-400 rounded text-xs">
-                            {selectedAlert.affected_users_count?.warning || 0} Warning
-                        </span>
-                        <span className="px-2 py-1 bg-yellow-500/20 text-yellow-400 rounded text-xs">
-                            {selectedAlert.affected_users_count?.watch || 0} Watch
-                        </span>
-                    </div>
-                </div>
-            </div>
 
-            {/* Event Details Table */}
-            <div className="bg-slate-800/50 rounded-xl p-4">
-                <h3 className="text-sm font-semibold text-slate-300 mb-3">Event Details</h3>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                    <div>
-                        <div className="text-xs text-slate-400">Type</div>
-                        <div className="text-white font-medium">{selectedAlert.event_type}</div>
-                    </div>
-                    <div>
-                        <div className="text-xs text-slate-400">Severity</div>
-                        <div className="text-white font-medium">{selectedAlert.severity}</div>
-                    </div>
-                    <div>
-                        <div className="text-xs text-slate-400">Radius</div>
-                        <div className="text-white font-medium">{selectedAlert.affected_radius_km} km</div>
-                    </div>
-                    <div>
-                        <div className="text-xs text-slate-400">Region</div>
-                        <div className="text-white font-medium">{selectedAlert.region}</div>
-                    </div>
-                    <div>
-                        <div className="text-xs text-slate-400">Detected At</div>
-                        <div className="text-white font-medium">{formatTime(selectedAlert.createdAt)}</div>
-                    </div>
-                </div>
-            </div>
-
-            {/* Deep Multi-Source Verification Layer */}
-            <div className="glass-card border border-primary-500/30 p-5 rounded-xl bg-slate-900/50 relative overflow-hidden">
-                <div className="absolute top-0 right-0 p-2 opacity-10">
-                    <span className="text-8xl">🕵️‍♂️</span>
+                    {onClearSelection && (
+                        <button type="button" onClick={onClearSelection} className="secondary-button self-start px-3 py-2" aria-label="Clear selection">
+                            <SystemIcon name="x" className="h-4 w-4" />
+                        </button>
+                    )}
                 </div>
 
-                <div className="flex items-center justify-between mb-4 relative z-10">
+                <div className="mt-6 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+                    <StatCard label="Severity" value={selectedAlert.severity} />
+                    <StatCard label="Radius" value={`${selectedAlert.affected_radius_km} km`} />
+                    <StatCard label="Critical" value={selectedAlert.affected_users_count?.critical || 0} />
+                    <StatCard label="Warning" value={selectedAlert.affected_users_count?.warning || 0} />
+                    <StatCard label="Watch" value={selectedAlert.affected_users_count?.watch || 0} />
+                </div>
+            </section>
+
+            <section className="panel p-6">
+                <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
                     <div>
-                        <h3 className="text-lg font-bold text-white flex items-center gap-2">
-                            Deep Multi-Source Verification
-                            {selectedAlert.verification_status === 'VERIFIED' && <span className="text-green-400 text-sm">✅ Verified</span>}
-                            {selectedAlert.verification_status === 'DISPUTED' && <span className="text-red-400 text-sm">❌ Disputed</span>}
-                            {selectedAlert.verification_status === 'VERIFYING' && <span className="text-yellow-400 text-sm animate-pulse">⏳ In Progress...</span>}
-                        </h3>
-                        <p className="text-xs text-slate-400">Cross-referencing Twitter, NewsAPI & Scientific Data with Gemini+Perplexity</p>
+                        <div className="section-title">Verification</div>
+                        <h3 className="mt-2 text-xl font-semibold text-slate-50">Deep Multi-Source Verification</h3>
+                        <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-400">
+                            Cross-referencing Twitter, NewsAPI and scientific data with Gemini and Perplexity
+                        </p>
                     </div>
-                    {/* Verification Score Badge */}
-                    {verificationScore !== null && (
-                        <div className={`text-center px-4 py-2 rounded-lg border ${verificationScore >= 70 ? 'bg-green-500/20 border-green-500 text-green-400' :
-                            verificationScore >= 40 ? 'bg-yellow-500/20 border-yellow-500 text-yellow-400' :
-                                'bg-red-500/20 border-red-500 text-red-400'
-                            }`}>
-                            <div className="text-xs uppercase tracking-wider font-bold">Confidence</div>
-                            <div className="text-2xl font-black">{verificationScore}%</div>
+
+                    {verificationScore != null && (
+                        <div className={`rounded-2xl border px-5 py-4 text-center ${confidenceTone}`}>
+                            <div className="section-title">Confidence</div>
+                            <div className="mt-2 text-3xl font-semibold">{verificationScore}%</div>
                         </div>
                     )}
                 </div>
 
-                {/* Action/Progress Area */}
-                {(selectedAlert.verification_status === 'UNVERIFIED' || !selectedAlert.verification_status) && selectedAlert.verification_status !== 'DISPUTED' ? (
+                <div className="mt-5">
+                    <SourceSelector
+                        title="Verification Sources"
+                        helperText="Defaults come from the backend. Change the set for this verification run only."
+                        providers={verificationProviders}
+                        selectedIds={selectedVerificationSourceIds}
+                        onToggle={toggleVerificationSource}
+                        disabled={verificationInFlight}
+                    />
+                    {sourceConfigError && (
+                        <div className="mt-3 text-xs text-amber-300">
+                            Source config unavailable: {sourceConfigError}. Verification will fall back to backend defaults.
+                        </div>
+                    )}
+                </div>
+
+                {canStartVerification && (
                     <button
+                        type="button"
                         onClick={handleVerify}
                         disabled={verifying}
-                        className="w-full py-3 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold rounded-lg shadow-lg shadow-blue-900/20 transition-all flex items-center justify-center gap-2"
+                        className="command-button mt-5"
                     >
-                        {verifying ? (
-                            <>
-                                <svg className="animate-spin h-5 w-5 text-white" viewBox="0 0 24 24">
-                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                                </svg>
-                                {verificationStep}
-                            </>
-                        ) : (
-                            <>🚀 Start Deep Forensic Investigation</>
-                        )}
+                        <span>Start Deep Forensic Investigation</span>
                     </button>
-                ) : verifying ? (
-                    <div className="w-full bg-slate-700/50 rounded-full h-4 overflow-hidden relative">
-                        <div className="absolute top-0 left-0 h-full bg-blue-500 animate-pulse w-full"></div>
-                        <div className="absolute top-0 left-0 h-full flex items-center justify-center w-full text-[10px] font-bold text-white uppercase tracking-widest">
-                            {verificationStep}
+                )}
+
+                {verificationInFlight && (
+                    <div className="mt-5 rounded-2xl border border-amber-400/20 bg-amber-400/10 p-4">
+                        <div className="flex items-center justify-between gap-3 text-sm text-amber-100">
+                            <span>{verificationStep || 'In Progress...'}</span>
                         </div>
-                    </div>
-                ) : (
-                    /* Results Panel */
-                    <div className="space-y-4 animate-fadeIn">
-                        {/* Big Corroboration Display */}
-                        <div className="bg-gradient-to-r from-slate-800 to-slate-700 rounded-xl p-4 text-center">
-                            <div className="text-xs text-slate-400 uppercase tracking-wider mb-1">Sources Corroborating Event</div>
-                            <div className="text-4xl font-black text-white">
-                                <span className={sourcesConfirmed > 0 ? 'text-green-400' : 'text-red-400'}>
-                                    {sourcesConfirmed || 0}
-                                </span>
-                                <span className="text-slate-500 mx-2">/</span>
-                                <span>{sourcesChecked || 0}</span>
-                            </div>
-                            <div className="text-xs text-slate-400 mt-1">
-                                {sourcesChecked > 0 && sourcesConfirmed > 0
-                                    ? `${Math.round((sourcesConfirmed / sourcesChecked) * 100)}% of sources confirm this event`
-                                    : 'No sources confirmed this event yet'}
-                            </div>
-                        </div>
-
-                        {/* Source Breakdown Grid */}
-                        <div className="grid grid-cols-2 gap-3">
-                            {/* Twitter Sources */}
-                            <details className="bg-black/30 rounded-lg p-3 cursor-pointer group">
-                                <summary className="flex items-center justify-between text-xs font-bold text-slate-400 uppercase">
-                                    <span>🐦 Twitter ({verificationData?.twitter_summary?.count || 0})</span>
-                                    <span className="text-[10px] text-slate-500">Click to expand</span>
-                                </summary>
-                                <div className="mt-2 space-y-1 max-h-40 overflow-y-auto">
-                                    {verificationData?.twitter_summary?.sources?.length > 0 ? (
-                                        verificationData.twitter_summary.sources.map((tweet, i) => (
-                                            <a
-                                                key={i}
-                                                href={tweet.url}
-                                                target="_blank"
-                                                rel="noopener noreferrer"
-                                                className="block text-[10px] text-blue-300 hover:text-blue-200 bg-slate-800/50 p-2 rounded"
-                                            >
-                                                <div className="flex items-center gap-1 mb-1">
-                                                    🔗 <span className="font-bold">@{tweet.username}</span>
-                                                    {tweet.is_trusted && <span className="text-green-400 text-[8px]">✓ Trusted</span>}
-                                                    <span className={`text-[8px] ${tweet.is_relevant === false ? 'text-red-400' : 'text-green-400'}`}>
-                                                        {tweet.is_relevant === false ? 'Not relevant' : 'Relevant'}
-                                                    </span>
-                                                </div>
-                                                <div className="text-[9px] text-slate-500 mb-1">
-                                                    score: {tweet.relevance_score ?? 'n/a'} · {tweet.relevance_reason || 'event match'}
-                                                </div>
-                                                <span className="text-slate-300">"{tweet.text?.substring(0, 100)}..."</span>
-                                            </a>
-                                        ))
-                                    ) : verificationData?.twitter_summary?.samples?.map((tweet, i) => (
-                                        <div key={i} className="text-[10px] text-slate-300 bg-slate-800/50 p-2 rounded">
-                                            "{typeof tweet === 'string' ? tweet.substring(0, 80) : tweet}..."
-                                        </div>
-                                    )) || <div className="text-[10px] text-slate-500">No tweets found</div>}
-                                </div>
-                            </details>
-
-                            {/* News Sources */}
-                            <details className="bg-black/30 rounded-lg p-3 cursor-pointer group">
-                                <summary className="flex items-center justify-between text-xs font-bold text-slate-400 uppercase">
-                                    <span>📰 News ({verificationData?.news_summary?.count || 0})</span>
-                                    <span className="text-[10px] text-slate-500">Click to expand</span>
-                                </summary>
-                                <div className="mt-2 space-y-1 max-h-40 overflow-y-auto">
-                                    {verificationData?.news_summary?.sources?.length > 0 ? (
-                                        verificationData.news_summary.sources.map((article, i) => (
-                                            <a
-                                                key={i}
-                                                href={article.url}
-                                                target="_blank"
-                                                rel="noopener noreferrer"
-                                                className="block text-[10px] text-blue-300 hover:text-blue-200 bg-slate-800/50 p-2 rounded"
-                                            >
-                                                🔗 {article.title} <span className="text-slate-500">({article.source})</span>
-                                                <div className="text-[9px] text-slate-500 mt-1">
-                                                    <span className={`${article.is_relevant === false ? 'text-red-400' : 'text-green-400'}`}>
-                                                        {article.is_relevant === false ? 'Not relevant' : 'Relevant'}
-                                                    </span>
-                                                    {' '}· score: {article.relevance_score ?? 'n/a'} · {article.relevance_reason || 'same-event'}
-                                                </div>
-                                            </a>
-                                        ))
-                                    ) : <div className="text-[10px] text-slate-500">No news articles found</div>}
-                                </div>
-                            </details>
-
-                            {/* Scientific Sources */}
-                            <details className="bg-black/30 rounded-lg p-3 cursor-pointer group">
-                                <summary className="flex items-center justify-between text-xs font-bold text-slate-400 uppercase">
-                                    <span>🔬 Scientific</span>
-                                    <span className={`text-[10px] ${verificationData?.scientific_verification?.seismic?.confirmed || verificationData?.scientific_verification?.weather?.confirmed ? 'text-green-400' : 'text-slate-500'}`}>
-                                        {verificationData?.scientific_verification?.seismic?.confirmed || verificationData?.scientific_verification?.weather?.confirmed ? '✓ Confirmed' : 'No data'}
-                                    </span>
-                                </summary>
-                                <div className="mt-2 space-y-1">
-                                    {verificationData?.scientific_verification?.seismic?.confirmed && (
-                                        <a href="https://earthquake.usgs.gov/earthquakes/map/" target="_blank" rel="noopener noreferrer" className="block text-[10px] text-blue-300 hover:text-blue-200 bg-slate-800/50 p-2 rounded">
-                                            🔗 USGS: M{verificationData.scientific_verification.seismic.magnitude} at {verificationData.scientific_verification.seismic.place}
-                                        </a>
-                                    )}
-                                    {verificationData?.scientific_verification?.weather?.confirmed && (
-                                        <div className="text-[10px] text-green-300 bg-slate-800/50 p-2 rounded">
-                                            ☁️ OpenWeather: {verificationData.scientific_verification.weather.description}
-                                        </div>
-                                    )}
-                                    {!verificationData?.scientific_verification?.seismic?.confirmed && !verificationData?.scientific_verification?.weather?.confirmed && (
-                                        <div className="text-[10px] text-slate-500">No scientific data available for this event type</div>
-                                    )}
-                                </div>
-                            </details>
-
-                            {/* Perplexity Web Search */}
-                            <details className="bg-black/30 rounded-lg p-3 cursor-pointer group">
-                                <summary className="flex items-center justify-between text-xs font-bold text-slate-400 uppercase">
-                                    <span>🌐 Web Search</span>
-                                    <span className={`text-[10px] ${verificationData?.web_search?.count > 0 || verificationData?.perplexity?.independent_confirmation_found ? 'text-green-400' : 'text-yellow-400'}`}>
-                                        {verificationData?.web_search?.count || verificationData?.perplexity?.corroborating_sources || 0} found
-                                    </span>
-                                </summary>
-                                <div className="mt-2 space-y-1 max-h-40 overflow-y-auto">
-                                    {verificationData?.web_search?.sources?.length > 0 ? (
-                                        verificationData.web_search.sources.map((source, i) => (
-                                            source.url ? (
-                                                <a
-                                                    key={i}
-                                                    href={source.url}
-                                                    target="_blank"
-                                                    rel="noopener noreferrer"
-                                                    className="block text-[10px] text-blue-300 hover:text-blue-200 bg-slate-800/50 p-2 rounded flex items-center gap-1"
-                                                >
-                                                    🔗 <span className="text-green-400">✓</span> {source.name}
-                                                </a>
-                                            ) : (
-                                                <div key={i} className="text-[10px] text-slate-300 bg-slate-800/50 p-2 rounded flex items-center gap-1">
-                                                    <span className="text-green-400">✓</span> {source.name}
-                                                </div>
-                                            )
-                                        ))
-                                    ) : verificationData?.perplexity?.key_sources?.map((source, i) => (
-                                        verificationData?.perplexity?.source_urls?.[i] ? (
-                                            <a
-                                                key={i}
-                                                href={verificationData.perplexity.source_urls[i]}
-                                                target="_blank"
-                                                rel="noopener noreferrer"
-                                                className="block text-[10px] text-blue-300 hover:text-blue-200 bg-slate-800/50 p-2 rounded flex items-center gap-1"
-                                            >
-                                                🔗 <span className="text-green-400">✓</span> {source}
-                                            </a>
-                                        ) : (
-                                            <div key={i} className="text-[10px] text-slate-300 bg-slate-800/50 p-2 rounded flex items-center gap-1">
-                                                <span className="text-green-400">✓</span> {source}
-                                            </div>
-                                        )
-                                    )) || <div className="text-[10px] text-slate-500">No web sources found</div>}
-                                    {verificationData?.perplexity?.summary && (
-                                        <p className="text-[10px] text-slate-400 italic mt-2 border-l-2 border-slate-600 pl-2">
-                                            {verificationData.perplexity.summary}
-                                        </p>
-                                    )}
-                                </div>
-                            </details>
-                        </div>
-
-                        {/* Gemini Summary */}
-                        <div className="bg-gradient-to-r from-purple-900/30 to-blue-900/30 rounded-lg p-3 border border-purple-500/20">
-                            <h4 className="text-xs font-bold text-purple-300 mb-2">🤖 Gemini Analysis Summary</h4>
-                            <p className="text-xs text-slate-300">
-                                {verificationData?.gemini?.summary || 'Analysis complete. See breakdown above.'}
-                            </p>
-                            <div className="flex gap-4 mt-2 text-[10px]">
-                                <span className="text-slate-400">Credibility: <span className={`font-bold ${verificationData?.gemini?.overall_credibility === 'high' ? 'text-green-400' : verificationData?.gemini?.overall_credibility === 'medium' ? 'text-yellow-400' : 'text-red-400'}`}>{verificationData?.gemini?.overall_credibility?.toUpperCase() || 'N/A'}</span></span>
-                                <span className="text-slate-400">Recommendation: <span className="font-bold text-white">{verificationData?.gemini?.recommendation || 'N/A'}</span></span>
-                            </div>
+                        <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-900">
+                            <div className="progress-bar h-full rounded-full" style={{ width: '100%' }}></div>
                         </div>
                     </div>
                 )}
-            </div>
 
-            {/* Map */}
-            <div className="h-48 rounded-xl overflow-hidden shadow-inner border border-slate-700">
-                <AlertMap
-                    lat={parseFloat(selectedAlert.lat)}
-                    lon={parseFloat(selectedAlert.lon)}
-                    radius={parseFloat(selectedAlert.affected_radius_km)}
-                    severity={selectedAlert.severity}
-                />
-            </div>
-
-            {/* Message Options */}
-            <div className="bg-slate-800/50 rounded-xl p-4">
-                <h3 className="text-sm font-semibold text-slate-300 mb-3">Select Message Option</h3>
-                <div className="space-y-3">
-                    {['concise', 'detailed', 'technical'].map(option => (
-                        <label
-                            key={option}
-                            className={`flex items-start p-3 rounded-lg cursor-pointer transition-all ${selectedOption === option && !customMessage
-                                ? 'bg-primary-500/20 border border-primary-500'
-                                : 'bg-slate-700/50 border border-transparent hover:border-slate-600'
-                                }`}
-                        >
-                            <input
-                                type="radio"
-                                name="messageOption"
-                                value={option}
-                                checked={selectedOption === option && !customMessage}
-                                onChange={() => {
-                                    setSelectedOption(option);
-                                    setCustomMessage('');
-                                }}
-                                className="mt-1 mr-3"
-                            />
-                            <div className="flex-1">
-                                <div className="text-white font-medium capitalize mb-1">{option}</div>
-                                <div className="text-xs text-slate-400 mb-2">
-                                    {selectedAlert.alert_messages?.[option]?.en || 'Loading...'}
+                {(verificationData || verificationScore != null || verificationState === 'VERIFIED' || verificationState === 'DISPUTED') && (
+                    <div className="mt-6 grid gap-6 xl:grid-cols-[300px,minmax(0,1fr)]">
+                        <div className="space-y-4">
+                            <div className="rounded-2xl border border-slate-800 bg-slate-950/45 p-4">
+                                <div className="section-title">Sources Corroborating Event</div>
+                                <div className="mt-3 flex items-end gap-3">
+                                    <div className="text-4xl font-semibold text-slate-50">{sourcesConfirmed}</div>
+                                    <div className="pb-1 text-sm text-slate-500">of {sourcesChecked} sources confirmed</div>
                                 </div>
-                                <div className="text-xs text-slate-500" dir="rtl">
-                                    {selectedAlert.alert_messages?.[option]?.ar || '...'}
+                                <div className="mt-3 text-xs text-slate-500">
+                                    {sourcesChecked > 0 && sourcesConfirmed > 0
+                                        ? `${Math.round((sourcesConfirmed / sourcesChecked) * 100)}% of sources confirm this event`
+                                        : 'No sources confirmed this event yet'}
                                 </div>
                             </div>
-                        </label>
-                    ))}
 
-                    {/* Custom Message */}
-                    <div className="mt-4">
-                        <label className="text-sm text-slate-300 mb-2 block">Or Write Custom Message:</label>
+                            {verificationSourceSelection?.resolved_details?.length > 0 && (
+                                <div className="rounded-2xl border border-slate-800 bg-slate-950/45 p-4">
+                                    <div className="section-title">Verification Sources Used</div>
+                                    <div className="mt-3 flex flex-wrap gap-2">
+                                        {verificationSourceSelection.resolved_details.map((source) => (
+                                            <span
+                                                key={source.id}
+                                                className="rounded-full border border-cyan-300/20 bg-cyan-300/10 px-3 py-1 text-xs font-medium text-cyan-100"
+                                            >
+                                                {source.label}
+                                            </span>
+                                        ))}
+                                    </div>
+                                    {verificationSourceSelection.ignored_unavailable?.length > 0 && (
+                                        <div className="mt-3 text-xs text-amber-300">
+                                            Ignored unavailable sources: {verificationSourceSelection.ignored_unavailable.join(', ')}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                            <div className="rounded-2xl border border-slate-800 bg-slate-950/45 p-4">
+                                <div className="section-title">Gemini Analysis Summary</div>
+                                <div className="mt-3 text-sm font-semibold text-slate-100">
+                                    {verificationData?.gemini?.recommendation || 'N/A'}
+                                </div>
+                                <div className="mt-2 text-xs text-slate-400">
+                                    {verificationData?.gemini?.summary || 'Analysis complete. See breakdown above.'}
+                                </div>
+                                <div className="mt-3 text-xs text-slate-500">
+                                    Credibility: <span className={`font-semibold uppercase tracking-[0.16em] ${credibilityTone}`}>{credibility || 'N/A'}</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="grid gap-4 md:grid-cols-2">
+                            <SourceListCard
+                                icon="social"
+                                title="Twitter"
+                                count={`${socialSources.length || socialSamples.length || 0} results`}
+                                status="Click to expand"
+                            >
+                                {socialSources.length > 0 ? socialSources.map((tweet, index) => (
+                                    <SourceRow
+                                        key={index}
+                                        href={tweet.url}
+                                        title={`@${tweet.username || 'unknown'}`}
+                                        meta={`score: ${tweet.relevance_score ?? 'n/a'} | ${tweet.relevance_reason || 'event match'}`}
+                                        body={tweet.text?.substring(0, 140)}
+                                        status={tweet.is_relevant === false ? 'Not relevant' : tweet.is_trusted ? 'Trusted' : 'Relevant'}
+                                    />
+                                )) : socialSamples.length > 0 ? socialSamples.map((tweet, index) => (
+                                    <SourceRow
+                                        key={index}
+                                        title={`Sample ${index + 1}`}
+                                        body={typeof tweet === 'string' ? tweet.substring(0, 140) : String(tweet)}
+                                    />
+                                )) : (
+                                    <div className="text-xs text-slate-500">No tweets found</div>
+                                )}
+                            </SourceListCard>
+
+                            <SourceListCard
+                                icon="news"
+                                title="News"
+                                count={`${newsSources.length || 0} results`}
+                                status="Click to expand"
+                            >
+                                {newsSources.length > 0 ? newsSources.map((article, index) => (
+                                    <SourceRow
+                                        key={index}
+                                        href={article.url}
+                                        title={article.title}
+                                        meta={`${article.source || 'Unknown source'} | score: ${article.relevance_score ?? 'n/a'} | ${article.relevance_reason || 'same event'}`}
+                                        status={article.is_relevant === false ? 'Not relevant' : 'Relevant'}
+                                    />
+                                )) : (
+                                    <div className="text-xs text-slate-500">No news articles found</div>
+                                )}
+                            </SourceListCard>
+
+                            <SourceListCard
+                                icon="science"
+                                title="Scientific"
+                                count="Sensor and scientific confirmations"
+                                status={verificationData?.scientific_verification?.seismic?.confirmed || verificationData?.scientific_verification?.weather?.confirmed ? 'Confirmed' : 'No data'}
+                            >
+                                {verificationData?.scientific_verification?.seismic?.confirmed && (
+                                    <SourceRow
+                                        href="https://earthquake.usgs.gov/earthquakes/map/"
+                                        title={`USGS magnitude ${verificationData.scientific_verification.seismic.magnitude}`}
+                                        meta={verificationData.scientific_verification.seismic.place}
+                                        status="confirmed"
+                                    />
+                                )}
+                                {verificationData?.scientific_verification?.weather?.confirmed && (
+                                    <SourceRow
+                                        title="OpenWeather"
+                                        meta={verificationData.scientific_verification.weather.description}
+                                        status="Confirmed"
+                                    />
+                                )}
+                                {!verificationData?.scientific_verification?.seismic?.confirmed && !verificationData?.scientific_verification?.weather?.confirmed && (
+                                    <div className="text-xs text-slate-500">No scientific data available for this event type</div>
+                                )}
+                            </SourceListCard>
+
+                            <SourceListCard
+                                icon="globe"
+                                title="Web Search"
+                                count={`${webSources.length || modelSources.length || 0} found`}
+                                status="Click to expand"
+                            >
+                                {webSources.length > 0 ? webSources.map((source, index) => (
+                                    <SourceRow
+                                        key={index}
+                                        href={source.url}
+                                        title={source.name}
+                                        status="Confirmed"
+                                    />
+                                )) : modelSources.length > 0 ? modelSources.map((source, index) => (
+                                    <SourceRow
+                                        key={index}
+                                        href={verificationData?.perplexity?.source_urls?.[index]}
+                                        title={source}
+                                        status="Confirmed"
+                                    />
+                                )) : (
+                                    <div className="text-xs text-slate-500">No web sources found</div>
+                                )}
+
+                                {verificationData?.perplexity?.summary && (
+                                    <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3 text-xs leading-5 text-slate-400">
+                                        {verificationData.perplexity.summary}
+                                    </div>
+                                )}
+                            </SourceListCard>
+                        </div>
+                    </div>
+                )}
+            </section>
+
+            <section className="grid gap-6 xl:grid-cols-[1.2fr,0.8fr]">
+                <div className="panel p-4">
+                    <div className="flex items-center justify-between gap-3">
+                        <div>
+                            <div className="section-title">Map</div>
+                            <div className="mt-2 text-sm font-semibold text-slate-100">Alert Coverage</div>
+                        </div>
+                        <SystemIcon name="map" className="h-5 w-5 text-cyan-200" />
+                    </div>
+                    <div className="mt-4 h-[320px] overflow-hidden rounded-2xl border border-slate-800">
+                        <AlertMap
+                            lat={parseFloat(selectedAlert.lat)}
+                            lon={parseFloat(selectedAlert.lon)}
+                            radius={parseFloat(selectedAlert.affected_radius_km)}
+                            severity={selectedAlert.severity}
+                        />
+                    </div>
+                </div>
+
+                <div className="panel p-6">
+                    <div className="section-title">Cost Estimate</div>
+                    <div className="mt-3 text-3xl font-semibold text-slate-50">{totalRecipients}</div>
+                    <div className="mt-1 text-sm text-slate-500">Total Recipients</div>
+
+                    <div className="mt-6 space-y-3">
+                        <StatCard label="Critical" value={selectedAlert.affected_users_count?.critical || 0} />
+                        <StatCard label="Warning" value={selectedAlert.affected_users_count?.warning || 0} />
+                        <StatCard label="Watch" value={selectedAlert.affected_users_count?.watch || 0} />
+                        <StatCard label="Estimated cost" value="$0.00" footnote="Carrier partnership" />
+                    </div>
+                </div>
+            </section>
+
+            <section className="grid gap-6 xl:grid-cols-[1.1fr,0.9fr]">
+                <div className="panel p-6">
+                    <div className="section-title">Select Message Option</div>
+
+                    <div className="mt-5 space-y-3">
+                        {MESSAGE_OPTIONS.map((option) => (
+                            <label
+                                key={option}
+                                className={`block cursor-pointer rounded-2xl border p-4 transition-all ${
+                                    selectedOption === option && !customMessage
+                                        ? 'border-cyan-300/45 bg-cyan-300/10'
+                                        : 'border-slate-800 bg-slate-950/45 hover:border-slate-700'
+                                }`}
+                            >
+                                <div className="flex items-start gap-3">
+                                    <input
+                                        type="radio"
+                                        name="messageOption"
+                                        value={option}
+                                        checked={selectedOption === option && !customMessage}
+                                        onChange={() => {
+                                            setSelectedOption(option);
+                                            setCustomMessage('');
+                                        }}
+                                        className="mt-1 h-4 w-4 accent-cyan-300"
+                                    />
+                                    <div className="min-w-0 flex-1">
+                                        <div className="text-sm font-semibold capitalize text-slate-100">{option}</div>
+                                        <div className="mt-2 text-sm leading-6 text-slate-400 [unicode-bidi:plaintext]" dir="ltr">
+                                            {getMessagePreview(selectedAlert.alert_messages?.[option]?.en, selectedAlert, 'en') || 'Loading...'}
+                                        </div>
+                                        <div
+                                            className="mt-3 text-right text-xs leading-6 text-slate-500 [unicode-bidi:plaintext]"
+                                            dir="rtl"
+                                            lang="ar"
+                                        >
+                                            {getMessagePreview(selectedAlert.alert_messages?.[option]?.ar, selectedAlert, 'ar') || '...'}
+                                        </div>
+                                    </div>
+                                </div>
+                            </label>
+                        ))}
+                    </div>
+
+                    <div className="mt-5">
+                        <label className="section-title">Or Write Custom Message:</label>
                         <textarea
                             value={customMessage}
                             onChange={(e) => setCustomMessage(e.target.value)}
                             placeholder="Enter custom alert message (will be translated to all languages)..."
-                            className="w-full px-4 py-3 bg-slate-700 border border-slate-600 rounded-lg text-white placeholder-slate-400 focus:outline-none focus:border-primary-500"
-                            rows={2}
+                            className="surface-input mt-2 resize-none"
+                            rows={4}
                         />
                     </div>
                 </div>
-            </div>
 
-            {/* Analyst Notes */}
-            <div>
-                <label className="text-sm text-slate-300 mb-2 block">Analyst Notes:</label>
-                <textarea
-                    value={analystNotes}
-                    onChange={(e) => setAnalystNotes(e.target.value)}
-                    placeholder="Add any notes about this decision..."
-                    className="w-full px-4 py-3 bg-slate-800/50 border border-slate-600 rounded-lg text-white placeholder-slate-400 focus:outline-none focus:border-primary-500"
-                    rows={2}
-                />
-            </div>
+                <div className="space-y-6">
+                    <section className="panel p-6">
+                        <div className="section-title">Analyst Notes:</div>
+                        <textarea
+                            value={analystNotes}
+                            onChange={(e) => setAnalystNotes(e.target.value)}
+                            placeholder="Add any notes about this decision..."
+                            className="surface-input mt-3 resize-none"
+                            rows={6}
+                        />
+                    </section>
 
-            {/* Cost Estimate */}
-            <div className="bg-slate-800/50 rounded-xl p-4">
-                <div className="flex items-center justify-between">
-                    <div>
-                        <div className="text-sm text-slate-400">Total Recipients</div>
-                        <div className="text-2xl font-bold text-white">
-                            {(selectedAlert.affected_users_count?.critical || 0) +
-                                (selectedAlert.affected_users_count?.warning || 0) +
-                                (selectedAlert.affected_users_count?.watch || 0)}
+                    {approvalStatus && (
+                        <section className={`panel p-4 ${
+                            approvalStatus.status === 'success'
+                                ? 'border border-emerald-400/25'
+                                : approvalStatus.status === 'error'
+                                    ? 'border border-red-400/25'
+                                    : 'border border-cyan-300/20'
+                        }`}>
+                            <div className="flex items-start gap-3">
+                                <SystemIcon
+                                    name={approvalStatus.status === 'error' ? 'alert' : approvalStatus.status === 'success' ? 'check' : 'scan'}
+                                    className={`mt-0.5 h-5 w-5 ${
+                                        approvalStatus.status === 'success'
+                                            ? 'text-emerald-300'
+                                            : approvalStatus.status === 'error'
+                                                ? 'text-red-300'
+                                                : 'text-cyan-200'
+                                    }`}
+                                />
+                                <div className="text-sm text-slate-200">{approvalStatus.message}</div>
+                            </div>
+                        </section>
+                    )}
+
+                    <section className="panel p-6">
+                        <div className="section-title">Actions</div>
+                        <div className="mt-4 flex flex-wrap gap-3">
+                            <button
+                                type="button"
+                                onClick={handleApprove}
+                                disabled={approving}
+                                className="command-button flex-1"
+                            >
+                                <SystemIcon name="send" className="h-4 w-4" />
+                                <span>{approving ? 'Sending...' : 'Approve & Send'}</span>
+                            </button>
+                            <button
+                                type="button"
+                                onClick={handleReject}
+                                className="danger-button flex-1"
+                            >
+                                <SystemIcon name="x" className="h-4 w-4" />
+                                <span>Reject</span>
+                            </button>
                         </div>
-                    </div>
-                    <div className="text-right">
-                        <div className="text-sm text-slate-400">Estimated Cost</div>
-                        <div className="text-2xl font-bold text-green-400">$0.00</div>
-                        <div className="text-xs text-slate-500">Carrier Partnership</div>
-                    </div>
+                    </section>
                 </div>
-            </div>
-
-            {/* Approval Status */}
-            {approvalStatus && (
-                <div className={`rounded-xl p-4 ${approvalStatus.status === 'success' ? 'bg-green-500/20' :
-                    approvalStatus.status === 'error' ? 'bg-red-500/20' :
-                        'bg-primary-500/20'
-                    }`}>
-                    <div className="flex items-center gap-2">
-                        {approvalStatus.status === 'processing' && (
-                            <svg className="animate-spin h-5 w-5 text-primary-400" viewBox="0 0 24 24">
-                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                            </svg>
-                        )}
-                        <span className={
-                            approvalStatus.status === 'success' ? 'text-green-400' :
-                                approvalStatus.status === 'error' ? 'text-red-400' :
-                                    'text-primary-400'
-                        }>
-                            {approvalStatus.message}
-                        </span>
-                    </div>
-                </div>
-            )}
-
-            {/* Action Buttons */}
-            <div className="flex gap-4">
-                <button
-                    onClick={handleApprove}
-                    disabled={approving}
-                    className="flex-1 py-4 rounded-xl bg-green-600 hover:bg-green-500 text-white font-bold text-lg transition-all disabled:opacity-50"
-                >
-                    {approving ? 'Sending...' : '✅ Approve & Send'}
-                </button>
-                <button
-                    onClick={handleReject}
-                    className="flex-1 py-4 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-lg transition-all"
-                >
-                    ❌ Reject
-                </button>
-            </div>
+            </section>
         </div>
     );
 }

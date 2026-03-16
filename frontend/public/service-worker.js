@@ -1,4 +1,4 @@
-// MedAlert Service Worker for Push Notifications
+// TANBIH Service Worker for Push Notifications
 
 self.addEventListener('install', (event) => {
     console.log('Service Worker installing...');
@@ -14,12 +14,12 @@ self.addEventListener('push', (event) => {
     console.log('Push notification received:', event);
 
     let data = {
-        title: '⚠️ MedAlert Notification',
+        title: 'TANBIH Notification',
         body: 'You have a new alert',
-        icon: '/favicon.svg',
-        badge: '/favicon.svg',
+        icon: '/tanbih-mark.svg',
+        badge: '/tanbih-mark.svg',
         vibrate: [200, 100, 200, 100, 200],
-        tag: 'medalert-notification',
+        tag: 'tanbih-notification',
         requireInteraction: true
     };
 
@@ -37,10 +37,10 @@ self.addEventListener('push', (event) => {
 
     const options = {
         body: data.body,
-        icon: data.icon || '/favicon.svg',
-        badge: data.badge || '/favicon.svg',
+        icon: data.icon || '/tanbih-mark.svg',
+        badge: data.badge || '/tanbih-mark.svg',
         vibrate: data.vibrate || [200, 100, 200],
-        tag: data.tag || 'medalert',
+        tag: data.tag || 'tanbih',
         requireInteraction: data.requireInteraction !== false,
         data: data.data || {},
         actions: data.actions || [

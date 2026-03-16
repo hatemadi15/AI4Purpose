@@ -410,64 +410,66 @@ function generateDemoSourceData(source, region) {
     }
 }
 
-// Main detection function - calls all APIs in parallel
-async function detectCrisis(region) {
-    console.log(`Starting crisis detection for region: ${region}`);
+const DETECTION_RUNNERS = {
+    usgs: { label: 'USGS', execute: fetchUSGS },
+    emsc: { label: 'EMSC', execute: fetchEMSC },
+    openweather: { label: 'OpenWeatherMap', execute: fetchOpenWeather },
+    tomorrow_io: { label: 'Tomorrow.io', execute: fetchTomorrow },
+    newsapi_ai: { label: 'NewsAPI.ai', execute: fetchNewsAPI },
+    twitter_x: { label: 'Twitter/X', execute: fetchTwitter }
+};
 
-    const results = await Promise.allSettled([
-        fetchUSGS(region),
-        fetchEMSC(region),
-        fetchOpenWeather(region),
-        fetchTomorrow(region),
-        fetchNewsAPI(region),
-        fetchTwitter(region)
-    ]);
+async function runDetectionSources(region, sourceIds, runnerMap = DETECTION_RUNNERS) {
+    const selectedSourceIds = [...new Set((sourceIds || []).filter((id) => runnerMap[id]))];
+    const results = await Promise.all(selectedSourceIds.map(async (sourceId) => {
+        const runner = runnerMap[sourceId];
 
-    const detectionData = results.map((result, index) => {
-        const sourceNames = ['USGS', 'EMSC', 'OpenWeatherMap', 'Tomorrow.io', 'NewsAPI.ai', 'Twitter/X'];
-        if (result.status === 'fulfilled') {
-            console.log(`${sourceNames[index]}: ${result.value.success ? `${result.value.count} items` : result.value.error}`);
-            return result.value;
+        try {
+            const result = await runner.execute(region);
+            console.log(`${runner.label}: ${result.success ? `${result.count || 0} items` : result.error}`);
+            return [sourceId, result];
+        } catch (error) {
+            console.error(`${runner.label} failed:`, error.message);
+            return [sourceId, {
+                source: runner.label,
+                success: false,
+                error: error.message || 'Unknown error',
+                data: [],
+                count: 0
+            }];
         }
-        // Return error result when API fails - NO demo fallback
-        console.error(`${sourceNames[index]} failed:`, result.reason?.message);
-        return {
-            source: sourceNames[index],
-            success: false,
-            error: result.reason?.message || 'Unknown error',
-            data: []
-        };
-    });
+    }));
 
-    // Analyze detection results to determine if there's a potential crisis
+    return Object.fromEntries(results);
+}
+
+function summarizeDetectionResults(region, resultsBySourceId) {
+    const regionCoords = REGIONS[region] || REGIONS.Lebanon;
     const earthquakes = [
-        ...detectionData[0].data,
-        ...detectionData[1].data
+        ...(resultsBySourceId.usgs?.data || []),
+        ...(resultsBySourceId.emsc?.data || [])
     ];
-
     const weatherAlerts = [
-        ...detectionData[2].data,
-        ...detectionData[3].data
+        ...(resultsBySourceId.openweather?.data || []),
+        ...(resultsBySourceId.tomorrow_io?.data || [])
     ];
+    const newsArticles = resultsBySourceId.newsapi_ai?.data || [];
+    const socialMentions = resultsBySourceId.twitter_x?.data || [];
 
-    const newsArticles = detectionData[4].data;
-    const socialMentions = detectionData[5].data;
-
-    // Determine primary event type and location
     let primaryEvent = null;
 
     if (earthquakes.length > 0) {
         const strongest = earthquakes.reduce((max, eq) => {
-            const mag = eq.properties?.mag || eq.properties?.magnitude || 0;
-            const maxMag = max.properties?.mag || max.properties?.magnitude || 0;
-            return mag > maxMag ? eq : max;
+            const magnitude = eq.properties?.mag || eq.properties?.magnitude || 0;
+            const maxMagnitude = max.properties?.mag || max.properties?.magnitude || 0;
+            return magnitude > maxMagnitude ? eq : max;
         }, earthquakes[0]);
 
         primaryEvent = {
             type: 'EARTHQUAKE',
             magnitude: strongest.properties?.mag || strongest.properties?.magnitude,
-            lat: strongest.geometry?.coordinates?.[1] || REGIONS[region].lat,
-            lon: strongest.geometry?.coordinates?.[0] || REGIONS[region].lon,
+            lat: strongest.geometry?.coordinates?.[1] || regionCoords.lat,
+            lon: strongest.geometry?.coordinates?.[0] || regionCoords.lon,
             time: strongest.properties?.time || Date.now(),
             depth: strongest.geometry?.coordinates?.[2] || 10,
             source: strongest
@@ -476,14 +478,13 @@ async function detectCrisis(region) {
         const alert = weatherAlerts[0];
         primaryEvent = {
             type: alert.event || alert.type || 'WEATHER_ALERT',
-            lat: REGIONS[region].lat,
-            lon: REGIONS[region].lon,
+            lat: regionCoords.lat,
+            lon: regionCoords.lon,
             severity: alert.severity || 'MEDIUM',
             description: alert.description || alert.headline,
             source: alert
         };
     } else if (newsArticles.length > 0) {
-        // Analyze news for crisis type
         const article = newsArticles[0];
         const title = (article.title || '').toLowerCase();
         let eventType = 'UNCONFIRMED_INCIDENT';
@@ -495,17 +496,14 @@ async function detectCrisis(region) {
 
         primaryEvent = {
             type: eventType,
-            lat: REGIONS[region].lat,
-            lon: REGIONS[region].lon,
+            lat: regionCoords.lat,
+            lon: regionCoords.lon,
             source: article,
             headline: article.title
         };
     }
 
     return {
-        region,
-        timestamp: new Date().toISOString(),
-        detectionData,
         primaryEvent,
         summary: {
             earthquakeCount: earthquakes.length,
@@ -517,13 +515,30 @@ async function detectCrisis(region) {
     };
 }
 
+async function detectCrisis(region, sourceIds = Object.keys(DETECTION_RUNNERS)) {
+    console.log(`Starting crisis detection for region: ${region}`);
+    const resultsBySourceId = await runDetectionSources(region, sourceIds);
+    const { primaryEvent, summary } = summarizeDetectionResults(region, resultsBySourceId);
+
+    return {
+        region,
+        timestamp: new Date().toISOString(),
+        resultsBySourceId,
+        primaryEvent,
+        summary
+    };
+}
+
 module.exports = {
     detectCrisis,
+    DETECTION_RUNNERS,
     fetchUSGS,
     fetchEMSC,
     fetchOpenWeather,
     fetchTomorrow,
     fetchNewsAPI,
     fetchTwitter,
-    REGIONS
+    REGIONS,
+    runDetectionSources,
+    summarizeDetectionResults
 };

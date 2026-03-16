@@ -1,14 +1,14 @@
 import { useEffect, useState, useCallback } from 'react';
 import { io } from 'socket.io-client';
 
-const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:5000';
-
 export function useSocket() {
     const [socket, setSocket] = useState(null);
     const [isConnected, setIsConnected] = useState(false);
 
     useEffect(() => {
-        const socketInstance = io(SOCKET_URL, {
+        const socketUrl = import.meta.env.VITE_SOCKET_URL || window.location.origin;
+        const socketInstance = io(socketUrl, {
+            path: '/socket.io',
             transports: ['websocket', 'polling'],
             reconnection: true,
             reconnectionAttempts: 5,

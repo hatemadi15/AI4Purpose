@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">TANBIH logo mark</title>
+  <desc id="desc">A gold falcon with a shield and eye inside concentric circles on a navy background.</desc>
+  <defs>
+    <linearGradient id="gold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f7df93" />
+      <stop offset="50%" stop-color="#f2c45d" />
+      <stop offset="100%" stop-color="#c9952c" />
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="40" fill="#123c63" />
+  <circle cx="128" cy="128" r="100" fill="none" stroke="url(#gold)" stroke-width="8" />
+  <circle cx="128" cy="128" r="91" fill="none" stroke="url(#gold)" stroke-width="2.5" opacity="0.85" />
+  <g fill="url(#gold)" stroke="url(#gold)" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M125 72c-16 9-35 13-54 10 6 11 17 21 32 29 10 5 20 9 31 11-8-8-11-18-9-30z" />
+    <path d="M131 72c16 9 35 13 54 10-6 11-17 21-32 29-10 5-20 9-31 11 8-8 11-18 9-30z" />
+    <path d="M128 77c-10 0-19 13-19 30 0 12 7 24 19 34 12-10 19-22 19-34 0-17-9-30-19-30z" />
+    <circle cx="131" cy="72" r="7.5" />
+    <path d="M137 71l11 3-10 5z" />
+    <path d="M106 147h44v27c0 20-15 36-22 41-7-5-22-21-22-41z" fill="none" stroke-width="5.5" />
+    <path d="M102 147l26-13 26 13" fill="none" stroke-width="5.5" />
+    <path d="M112 163c7-8 19-8 32 0" fill="none" stroke-width="4" />
+    <path d="M112 170c8 7 24 7 32 0" fill="none" stroke-width="4" />
+    <circle cx="128" cy="166.5" r="5.5" />
+    <path d="M92 170c-9 8-9 26 0 34" fill="none" stroke-width="4.5" />
+    <path d="M82 162c-14 12-14 39 0 51" fill="none" stroke-width="4.5" />
+    <path d="M164 170c9 8 9 26 0 34" fill="none" stroke-width="4.5" />
+    <path d="M174 162c14 12 14 39 0 51" fill="none" stroke-width="4.5" />
+  </g>
+</svg>

@@ -2,6 +2,7 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 const axios = require('axios');
 const Alert = require('../models/Alert');
 const { generatePostVerificationTemplates } = require('./geminiService');
+const { resolveSourceSelection } = require('../config/sourceCatalog');
 require('dotenv').config();
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
@@ -239,6 +240,36 @@ function parseArticleTime(article) {
     return Number.isNaN(time) ? null : time;
 }
 
+function createEmptyTwitterSearchResult() {
+    return {
+        texts: [],
+        metadata: [],
+        image_urls: [],
+        sources: {
+            broad_count: 0,
+            trusted_count: 0,
+            filtered_count: 0,
+            trusted_accounts_searched: TRUSTED_TWITTER_ACCOUNTS
+        }
+    };
+}
+
+function createEmptyPerplexitySearchResult() {
+    return {
+        independent_confirmation_found: false,
+        total_sources_found: 0,
+        corroborating_sources: 0,
+        key_sources: [],
+        source_urls: [],
+        source_types: [],
+        summary: ''
+    };
+}
+
+function createEmptyScientificVerification() {
+    return { weather: null, seismic: null };
+}
+
 // --- A. Real Twitter Search (Twitter API v2 Recent Search) with RELEVANCE FILTERING ---
 // --- A. Real Twitter Search (Twitter API v2 Recent Search) with RELEVANCE FILTERING ---
 // --- A. Real Twitter Search (Twitter API v2 Recent Search) with RELEVANCE FILTERING ---
@@ -320,12 +351,7 @@ async function searchTwitter(eventDetails, searchKeywords) {
 
         if (!process.env.TWITTER_API_KEY || !process.env.TWITTER_API_SECRET) {
             console.warn('[Twitter] Missing API credentials; skipping Twitter verification');
-            return {
-                texts: [],
-                metadata: [],
-                image_urls: [],
-                sources: { broad_count: 0, trusted_count: 0, filtered_count: 0, trusted_accounts_searched: TRUSTED_TWITTER_ACCOUNTS }
-            };
+            return createEmptyTwitterSearchResult();
         }
 
         // 1. Get Access Token using Basic Auth
@@ -495,7 +521,7 @@ async function searchTwitter(eventDetails, searchKeywords) {
 
     } catch (error) {
         console.error('[Twitter] Error:', error.response?.data || error.message);
-        return { texts: [], metadata: [], image_urls: [], sources: { broad_count: 0, trusted_count: 0, filtered_count: 0, trusted_accounts_searched: TRUSTED_TWITTER_ACCOUNTS } };
+        return createEmptyTwitterSearchResult();
     }
 }
 
@@ -681,13 +707,10 @@ async function searchNews(eventDetails, searchKeywords) {
     }
 }
 
-// --- C. Weather/Seismic Verification (OpenWeatherAPI now active for ALL events) ---
-async function checkWeatherAndSeismic(eventDetails) {
-    const results = { weather: null, seismic: null };
-
-    // ALWAYS fetch weather data for context (OpenWeatherAPI key is now active)
+// --- C. Weather/Seismic Verification ---
+async function checkWeatherVerification(eventDetails) {
     const weatherRelatedEvents = ['Flood', 'Storm', 'Hurricane', 'Tornado', 'Extreme Weather', 'Fire', 'Lightning'];
-    const isWeatherEvent = weatherRelatedEvents.some(t => eventDetails.type.toLowerCase().includes(t.toLowerCase()));
+    const isWeatherEvent = weatherRelatedEvents.some((type) => eventDetails.type.toLowerCase().includes(type.toLowerCase()));
 
     try {
         const weatherRes = await axios.get(
@@ -695,9 +718,8 @@ async function checkWeatherAndSeismic(eventDetails) {
             { timeout: 10000 }
         );
         const weatherData = weatherRes.data;
-
-        results.weather = {
-            confirmed: isWeatherEvent,  // Only "confirmed" for weather-related events
+        const result = {
+            confirmed: isWeatherEvent,
             condition: weatherData.weather?.[0]?.main,
             description: weatherData.weather?.[0]?.description,
             temperature: weatherData.main?.temp,
@@ -705,44 +727,189 @@ async function checkWeatherAndSeismic(eventDetails) {
             wind_speed: weatherData.wind?.speed,
             visibility: weatherData.visibility,
             source: 'OpenWeatherMap',
-            contextual: !isWeatherEvent  // Flag: weather data for context, not primary verification
+            contextual: !isWeatherEvent
         };
 
         if (isWeatherEvent) {
-            console.log('[Weather] Confirmed event-related:', results.weather.condition);
+            console.log('[Weather] Confirmed event-related:', result.condition);
         } else {
-            console.log('[Weather] Context data:', results.weather.condition, `${results.weather.temperature}°C`);
+            console.log('[Weather] Context data:', result.condition, `${result.temperature}°C`);
         }
-    } catch (e) {
-        console.error('[Weather] Error:', e.message);
+
+        return result;
+    } catch (error) {
+        console.error('[Weather] Error:', error.message);
+        return null;
+    }
+}
+
+async function checkSeismicVerification(eventDetails) {
+    if (!eventDetails.type.toLowerCase().includes('earthquake')) {
+        return null;
     }
 
-    // USGS for earthquakes
-    if (eventDetails.type.toLowerCase().includes('earthquake')) {
-        try {
-            const now = new Date();
-            const startTime = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString(); // Last 24hrs
-            const usgsRes = await axios.get(
-                `https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson&starttime=${startTime}&latitude=${eventDetails.lat}&longitude=${eventDetails.lon}&maxradiuskm=100`,
-                { timeout: 10000 }
-            );
-            const quakes = usgsRes.data.features || [];
-            if (quakes.length > 0) {
-                const strongest = quakes.reduce((a, b) => a.properties.mag > b.properties.mag ? a : b);
-                results.seismic = {
-                    confirmed: true,
-                    magnitude: strongest.properties.mag,
-                    place: strongest.properties.place,
-                    source: 'USGS'
-                };
-                console.log('[Seismic] Confirmed:', results.seismic.magnitude, 'M at', results.seismic.place);
-            }
-        } catch (e) {
-            console.error('[Seismic] Error:', e.message);
+    try {
+        const now = new Date();
+        const startTime = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
+        const usgsRes = await axios.get(
+            `https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson&starttime=${startTime}&latitude=${eventDetails.lat}&longitude=${eventDetails.lon}&maxradiuskm=100`,
+            { timeout: 10000 }
+        );
+        const quakes = usgsRes.data.features || [];
+
+        if (quakes.length === 0) {
+            return null;
+        }
+
+        const strongest = quakes.reduce((a, b) => a.properties.mag > b.properties.mag ? a : b);
+        const result = {
+            confirmed: true,
+            magnitude: strongest.properties.mag,
+            place: strongest.properties.place,
+            source: 'USGS'
+        };
+
+        console.log('[Seismic] Confirmed:', result.magnitude, 'M at', result.place);
+        return result;
+    } catch (error) {
+        console.error('[Seismic] Error:', error.message);
+        return null;
+    }
+}
+
+async function runVerificationSources({
+    alertId,
+    io,
+    eventDetails,
+    searchKeywords,
+    sourceSelection,
+    deps = {
+        searchTwitter,
+        searchNews,
+        checkWeatherVerification,
+        checkSeismicVerification,
+        perplexitySearch,
+        analyzeMedia
+    }
+}) {
+    const enabledSources = new Set(sourceSelection.resolved);
+    let twitterData = createEmptyTwitterSearchResult();
+    let mediaAnalysis = { analyzed: false, images: [] };
+    let newsData = [];
+    const scientificData = createEmptyScientificVerification();
+    let perplexityData = createEmptyPerplexitySearchResult();
+
+    if (enabledSources.has('twitter_search')) {
+        if (io) io.emit('verification_progress', { alertId, step: 'Searching Twitter for eyewitness reports...' });
+        twitterData = await deps.searchTwitter(eventDetails, searchKeywords);
+
+        if (twitterData.image_urls && twitterData.image_urls.length > 0) {
+            if (io) io.emit('verification_progress', { alertId, step: `Analyzing ${twitterData.image_urls.length} media images...` });
+            mediaAnalysis = await deps.analyzeMedia(twitterData.image_urls, eventDetails);
         }
     }
 
-    return results;
+    if (enabledSources.has('newsapi_ai')) {
+        if (io) io.emit('verification_progress', { alertId, step: 'Searching news sources...' });
+        newsData = await deps.searchNews(eventDetails, searchKeywords);
+    }
+
+    if (enabledSources.has('openweather') || enabledSources.has('usgs')) {
+        if (io) io.emit('verification_progress', { alertId, step: 'Checking scientific data...' });
+
+        const [weatherResult, seismicResult] = await Promise.all([
+            enabledSources.has('openweather')
+                ? deps.checkWeatherVerification(eventDetails)
+                : Promise.resolve(null),
+            enabledSources.has('usgs')
+                ? deps.checkSeismicVerification(eventDetails)
+                : Promise.resolve(null)
+        ]);
+
+        scientificData.weather = weatherResult;
+        scientificData.seismic = seismicResult;
+    }
+
+    if (enabledSources.has('perplexity')) {
+        if (io) io.emit('verification_progress', { alertId, step: 'Running Perplexity independent search...' });
+        perplexityData = await deps.perplexitySearch(eventDetails, searchKeywords);
+    }
+
+    return {
+        twitterData,
+        mediaAnalysis,
+        newsData,
+        scientificData,
+        perplexityData
+    };
+}
+
+function calculateVerificationOutcome({
+    enabledSourceIds = [],
+    twitterData = createEmptyTwitterSearchResult(),
+    newsData = [],
+    scientificData = createEmptyScientificVerification(),
+    perplexityData = createEmptyPerplexitySearchResult(),
+    mediaAnalysis = { analyzed: false, images: [], summary: {} },
+    geminiResult = {}
+}) {
+    const enabledSources = new Set(enabledSourceIds);
+    const twitterFound = enabledSources.has('twitter_search') ? (twitterData.texts?.length || 0) : 0;
+    const newsFound = enabledSources.has('newsapi_ai') ? (newsData.length || 0) : 0;
+    const weatherChecked = enabledSources.has('openweather') && scientificData.weather ? 1 : 0;
+    const seismicChecked = enabledSources.has('usgs') && scientificData.seismic ? 1 : 0;
+    const weatherConfirmed = enabledSources.has('openweather') && scientificData.weather?.confirmed ? 1 : 0;
+    const seismicConfirmed = enabledSources.has('usgs') && scientificData.seismic?.confirmed ? 1 : 0;
+    const perplexityTotal = enabledSources.has('perplexity')
+        ? (perplexityData.total_sources_found || (perplexityData.independent_confirmation_found ? 1 : 0))
+        : 0;
+    const perplexityCorroborating = enabledSources.has('perplexity')
+        ? (perplexityData.corroborating_sources || (perplexityData.independent_confirmation_found ? 1 : 0))
+        : 0;
+    const geminiAnalyzed = (geminiResult.sources_analysis || []).filter((source) => source.is_same_event).length;
+    const semanticScore = geminiResult.semantic_match_score || 0;
+
+    let corroborationRate;
+    if (semanticScore >= 70) corroborationRate = 0.8;
+    else if (semanticScore >= 50) corroborationRate = 0.6;
+    else if (semanticScore >= 30) corroborationRate = 0.4;
+    else if (twitterFound > 0 || newsFound > 0) corroborationRate = 0.2;
+    else corroborationRate = 0;
+
+    const twitterCorroborating = Math.ceil(twitterFound * corroborationRate);
+    const newsCorroborating = Math.ceil(newsFound * corroborationRate);
+    const scientificConfirmed = weatherConfirmed + seismicConfirmed;
+    const totalSources = twitterFound + newsFound + weatherChecked + seismicChecked + perplexityTotal;
+    const confirmedSources = geminiAnalyzed + scientificConfirmed + perplexityCorroborating + twitterCorroborating + newsCorroborating;
+    const sourceBonus = Math.min(30, (twitterFound + newsFound) * 2);
+    const baseScore = Math.max(semanticScore, sourceBonus);
+    const scientificBonus = (weatherConfirmed ? 15 : 0) + (seismicConfirmed ? 20 : 0);
+    const perplexityBonus = perplexityCorroborating > 0 ? Math.min(perplexityCorroborating * 5, 15) : 0;
+    const mediaBonus = enabledSources.has('twitter_search') && mediaAnalysis.summary?.high_value_evidence > 0
+        ? Math.min(mediaAnalysis.summary.high_value_evidence * 10, 20)
+        : 0;
+    const finalScore = Math.min(100, baseScore + scientificBonus + perplexityBonus + mediaBonus);
+    const finalStatus = finalScore >= 50 ? 'VERIFIED' : 'DISPUTED';
+
+    return {
+        totalSources,
+        confirmedSources,
+        semanticScore,
+        corroborationRate,
+        twitterFound,
+        newsFound,
+        weatherChecked,
+        seismicChecked,
+        weatherConfirmed,
+        seismicConfirmed,
+        twitterCorroborating,
+        newsCorroborating,
+        perplexityTotal,
+        perplexityCorroborating,
+        mediaBonus,
+        finalScore,
+        finalStatus
+    };
 }
 
 // --- C2. Media Analysis using Gemini Vision ---
@@ -992,11 +1159,12 @@ Output strict JSON:
 }
 
 // --- F. Main Orchestrator ---
-async function performDeepVerification(alertId, io) {
+async function performDeepVerification(alertId, io, requestedSourceIds) {
     const alert = await Alert.findByPk(alertId);
     if (!alert) throw new Error('Alert not found');
 
     await alert.update({ verification_status: 'VERIFYING' });
+    const sourceSelection = resolveSourceSelection('verification', requestedSourceIds);
 
     const detectionFinding = alert.detection_data?.finding || alert.all_intel_findings?.finding;
     const detectionDescription = detectionFinding?.description
@@ -1020,25 +1188,19 @@ async function performDeepVerification(alertId, io) {
         arabic: searchKeywords.arabic_keywords?.slice(0, 3)
     });
 
-    // Step 1: Parallel Data Collection with dynamic keywords
-    if (io) io.emit('verification_progress', { alertId, step: 'Searching Twitter for eyewitness reports...' });
-    const twitterData = await searchTwitter(eventDetails, searchKeywords);
-
-    // Step 1b: Analyze media from tweets (if images found)
-    let mediaAnalysis = { analyzed: false, images: [] };
-    if (twitterData.image_urls && twitterData.image_urls.length > 0) {
-        if (io) io.emit('verification_progress', { alertId, step: `Analyzing ${twitterData.image_urls.length} media images...` });
-        mediaAnalysis = await analyzeMedia(twitterData.image_urls, eventDetails);
-    }
-
-    if (io) io.emit('verification_progress', { alertId, step: 'Searching news sources...' });
-    const newsData = await searchNews(eventDetails, searchKeywords);
-
-    if (io) io.emit('verification_progress', { alertId, step: 'Checking weather and seismic data...' });
-    const scientificData = await checkWeatherAndSeismic(eventDetails);
-
-    if (io) io.emit('verification_progress', { alertId, step: 'Running Perplexity independent search...' });
-    const perplexityData = await perplexitySearch(eventDetails, searchKeywords);
+    const {
+        twitterData,
+        mediaAnalysis,
+        newsData,
+        scientificData,
+        perplexityData
+    } = await runVerificationSources({
+        alertId,
+        io,
+        eventDetails,
+        searchKeywords,
+        sourceSelection
+    });
 
     // Step 2: Gemini Synthesis
     if (io) io.emit('verification_progress', { alertId, step: 'Gemini analyzing all sources...' });
@@ -1051,58 +1213,30 @@ async function performDeepVerification(alertId, io) {
     };
     const geminiResult = await geminiAnalyze(allData, eventDetails);
 
-    // Step 3: Calculate Final Score with improved corroboration tracking
-    const perplexityCorroborating = perplexityData.corroborating_sources || (perplexityData.independent_confirmation_found ? 1 : 0);
-    const perplexityTotal = perplexityData.total_sources_found || (perplexityData.independent_confirmation_found ? 1 : 0);
+    const outcome = calculateVerificationOutcome({
+        enabledSourceIds: sourceSelection.resolved,
+        twitterData,
+        newsData,
+        scientificData,
+        perplexityData,
+        mediaAnalysis,
+        geminiResult
+    });
 
-    const totalSources = twitterData.texts.length + newsData.length +
-        (scientificData.weather ? 1 : 0) + (scientificData.seismic ? 1 : 0) + perplexityTotal;
-
-    // Improved corroboration logic: Found sources = potential corroboration
-    // Use Gemini to adjust the percentage, but always count SOME sources if found
-    const geminiAnalyzed = (geminiResult.sources_analysis || []).filter(s => s.is_same_event).length;
-    const scientificConfirmed = (scientificData.weather?.confirmed ? 1 : 0) + (scientificData.seismic?.confirmed ? 1 : 0);
-
-    const semanticScore = geminiResult.semantic_match_score || 0;
-
-    // Always count at least 20% of found sources as potentially corroborating
-    // Higher Gemini scores increase this percentage
-    let corroborationRate;
-    if (semanticScore >= 70) corroborationRate = 0.8;       // High confidence
-    else if (semanticScore >= 50) corroborationRate = 0.6;  // Medium-high
-    else if (semanticScore >= 30) corroborationRate = 0.4;  // Medium
-    else if (twitterData.texts.length > 0 || newsData.length > 0) corroborationRate = 0.2;  // Low but found sources
-    else corroborationRate = 0;
-
-    const twitterCorroborating = Math.ceil(twitterData.texts.length * corroborationRate);
-    const newsCorroborating = Math.ceil(newsData.length * corroborationRate);
-
-    const confirmedSources = geminiAnalyzed + scientificConfirmed + perplexityCorroborating +
-        twitterCorroborating + newsCorroborating;
-
-    console.log(`[Corroboration] ${confirmedSources}/${totalSources} (Gemini: ${semanticScore}%, rate: ${(corroborationRate * 100).toFixed(0)}%)`);
-
-    // Base score should also factor in source counts if Gemini fails
-    const sourceBonus = Math.min(30, (twitterData.texts.length + newsData.length) * 2); // Up to 30 points for having sources
-    const baseScore = Math.max(semanticScore, sourceBonus);  // Use whichever is higher
-    const scientificBonus = (scientificData.weather?.confirmed ? 15 : 0) + (scientificData.seismic?.confirmed ? 20 : 0);
-    const perplexityBonus = perplexityCorroborating > 0 ? Math.min(perplexityCorroborating * 5, 15) : 0;
-
-    // Media analysis bonus: high-value visual evidence adds credibility
-    const mediaBonus = mediaAnalysis.summary?.high_value_evidence > 0 ?
-        Math.min(mediaAnalysis.summary.high_value_evidence * 10, 20) : 0;
-
-    const finalScore = Math.min(100, baseScore + scientificBonus + perplexityBonus + mediaBonus);
-    const finalStatus = finalScore >= 50 ? 'VERIFIED' : 'DISPUTED';
+    console.log(
+        `[Corroboration] ${outcome.confirmedSources}/${outcome.totalSources} ` +
+        `(Gemini: ${outcome.semanticScore}%, rate: ${(outcome.corroborationRate * 100).toFixed(0)}%)`
+    );
 
     // Step 4: Save Results with full source details including URLs
     const verificationData = {
+        source_selection: sourceSelection,
         gemini: geminiResult,
         perplexity: perplexityData,
         // Twitter: include full metadata with URLs and relevance scores
         twitter_summary: {
-            count: twitterData.texts.length,
-            filtered_from: twitterData.sources?.broad_count + twitterData.sources?.trusted_count || 0,
+            count: outcome.twitterFound,
+            filtered_from: (twitterData.sources?.broad_count || 0) + (twitterData.sources?.trusted_count || 0),
             filter_keywords: twitterData.sources?.filter_keywords || {},
             samples: twitterData.texts.slice(0, 5),
             sources: twitterData.metadata?.slice(0, 20).map(m => ({
@@ -1118,8 +1252,8 @@ async function performDeepVerification(alertId, io) {
         },
         // News: include full article details with URLs and relevance scores
         news_summary: {
-            count: newsData.length,
-            same_event_count: newsData.length,
+            count: outcome.newsFound,
+            same_event_count: outcome.newsFound,
             same_event_window_hours: NEWS_SAME_EVENT_WINDOW_HOURS,
             samples: newsData.slice(0, 5).map(n => n.title),
             sources: newsData.slice(0, 20).map(n => ({
@@ -1149,7 +1283,7 @@ async function performDeepVerification(alertId, io) {
         },
         // Web Search: include Perplexity source URLs
         web_search: {
-            count: perplexityData.total_sources_found || 0,
+            count: outcome.perplexityTotal,
             sources: (perplexityData.key_sources || []).map((source, i) => ({
                 name: source,
                 url: perplexityData.source_urls?.[i] || null,
@@ -1157,15 +1291,15 @@ async function performDeepVerification(alertId, io) {
             }))
         },
         corroboration: {
-            total_sources_checked: totalSources,
-            sources_corroborating: confirmedSources,
-            gemini_semantic_score: semanticScore,
+            total_sources_checked: outcome.totalSources,
+            sources_corroborating: outcome.confirmedSources,
+            gemini_semantic_score: outcome.semanticScore,
             breakdown: {
-                twitter: { found: twitterData.texts.length, corroborating: twitterCorroborating },
-                news: { found: newsData.length, corroborating: newsCorroborating },
-                weather: scientificData.weather?.confirmed ? 1 : 0,
-                seismic: scientificData.seismic?.confirmed ? 1 : 0,
-                perplexity: perplexityCorroborating,
+                twitter: { found: outcome.twitterFound, corroborating: outcome.twitterCorroborating },
+                news: { found: outcome.newsFound, corroborating: outcome.newsCorroborating },
+                weather: outcome.weatherConfirmed,
+                seismic: outcome.seismicConfirmed,
+                perplexity: outcome.perplexityCorroborating,
                 media: mediaAnalysis.summary?.high_value_evidence || 0
             }
         }
@@ -1177,8 +1311,8 @@ async function performDeepVerification(alertId, io) {
             alert,
             eventDetails,
             verificationData,
-            verificationStatus: finalStatus,
-            verificationScore: finalScore
+            verificationStatus: outcome.finalStatus,
+            verificationScore: outcome.finalScore
         });
         if (postVerificationTemplates?.messages) {
             verificationData.post_verification_templates = {
@@ -1197,10 +1331,10 @@ async function performDeepVerification(alertId, io) {
 
     const updatePayload = {
         verification_data: verificationData,
-        verification_score: finalScore,
-        verification_status: finalStatus,
-        sources_checked: totalSources,
-        sources_confirmed: confirmedSources
+        verification_score: outcome.finalScore,
+        verification_status: outcome.finalStatus,
+        sources_checked: outcome.totalSources,
+        sources_confirmed: outcome.confirmedSources
     };
 
     if (postVerificationTemplates?.messages) {
@@ -1214,19 +1348,25 @@ async function performDeepVerification(alertId, io) {
         io.emit('verification_complete', {
             alertId: updatedAlert.id,
             alert: updatedAlert,
-            score: finalScore,
-            verification_status: finalStatus,
+            score: outcome.finalScore,
+            verification_status: outcome.finalStatus,
             data: verificationData
         });
     }
 
-    console.log(`[Verification Complete] Alert ${alertId}: ${finalStatus} (${finalScore}%)`);
-    return { score: finalScore, verification_status: finalStatus, data: verificationData };
+    console.log(`[Verification Complete] Alert ${alertId}: ${outcome.finalStatus} (${outcome.finalScore}%)`);
+    return { score: outcome.finalScore, verification_status: outcome.finalStatus, data: verificationData };
 }
 
 module.exports = {
+    calculateVerificationOutcome,
+    checkSeismicVerification,
+    checkWeatherVerification,
+    createEmptyPerplexitySearchResult,
+    createEmptyTwitterSearchResult,
     performDeepVerification,
     generateSearchKeywords,
+    runVerificationSources,
     searchTwitter,
     searchNews
 };

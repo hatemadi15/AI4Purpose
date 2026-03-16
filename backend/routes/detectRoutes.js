@@ -1,11 +1,12 @@
 const express = require('express');
 const router = express.Router();
-const { detectCrisis } = require('../services/detectionService');
+const { detectCrisis, DETECTION_RUNNERS } = require('../services/detectionService');
 const { verifyEvent } = require('../services/perplexityService');
 const { generateAlertOptions } = require('../services/geminiService');
 const { findAffectedUsers, calculateCost } = require('../services/geoService');
-const { fetchIntelTwitter, aggregateIntel, isRecentIntel, fetchMinistryAlerts } = require('../services/intelService');
-const { scrapeAllNews } = require('../services/newsScraperService');
+const { fetchIntelTwitter, aggregateIntel, fetchMinistryAlerts } = require('../services/intelService');
+const { NEWS_SCRAPER_REGISTRY, scrapeAllNews } = require('../services/newsScraperService');
+const { getSourceConfig, resolveSourceSelection } = require('../config/sourceCatalog');
 const Alert = require('../models/Alert');
 const IntelFinding = require('../models/IntelFinding');
 
@@ -82,55 +83,59 @@ router.get('/detect/findings', async (req, res) => {
     }
 });
 
+router.get('/source-config', async (req, res) => {
+    try {
+        res.json({
+            success: true,
+            ...getSourceConfig()
+        });
+    } catch (error) {
+        console.error('Get source config error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 // POST /api/detect - Gather intel and return ALL findings for analyst review
 router.post('/detect', async (req, res) => {
-    const { region = 'Lebanon' } = req.body;
+    const { region = 'Lebanon', source_ids } = req.body || {};
     const io = req.app.get('io');
+    const sourceSelection = resolveSourceSelection('detection', source_ids);
 
     try {
-        // Step 0: Clear previous findings not to confuse the analyst with old data
-        // "Refresh" the run as requested
         await IntelFinding.destroy({ where: { region } });
         io.emit('detection_status', { step: 0, message: 'Clearing previous data for fresh run...', progress: 5 });
 
-        // Step 1: Gather intel from all sources
-        io.emit('detection_status', { step: 1, message: 'Gathering intelligence from all sources (APIs + news scrapers)...', progress: 10 });
+        io.emit('detection_status', {
+            step: 1,
+            message: `Gathering intelligence from ${sourceSelection.resolved.length} configured sources...`,
+            progress: 10
+        });
 
-        // Fetch from detection APIs, intel Twitter, Ministry Demo API, AND news scrapers in parallel
+        const detectionSourceIds = sourceSelection.resolved.filter((id) => DETECTION_RUNNERS[id]);
+        const scraperSourceIds = sourceSelection.resolved.filter((id) => NEWS_SCRAPER_REGISTRY[id]);
+        const shouldRunIntelTwitter = sourceSelection.resolved.includes('intel_twitter');
+        const shouldRunMinistry = sourceSelection.resolved.includes('ministry_info');
+
         const [detectionData, twitterIntel, ministryIntel, scrapedNews] = await Promise.all([
-            detectCrisis(region),
-            fetchIntelTwitter(region),
-            fetchMinistryAlerts(region),
-            scrapeAllNews(region)
+            detectCrisis(region, detectionSourceIds),
+            shouldRunIntelTwitter ? fetchIntelTwitter(region) : Promise.resolve(null),
+            shouldRunMinistry ? fetchMinistryAlerts(region) : Promise.resolve(null),
+            scraperSourceIds.length > 0 ? scrapeAllNews(region, scraperSourceIds) : Promise.resolve(null)
         ]);
 
-        console.log(`[Detect] Scraped news: ${scrapedNews.count} articles from ${scrapedNews.sources?.filter(s => s.success).length || 0} sources`);
+        const sourceResults = {
+            ...detectionData.resultsBySourceId,
+            ...(twitterIntel ? { intel_twitter: twitterIntel } : {}),
+            ...(ministryIntel ? { ministry_info: ministryIntel } : {}),
+            ...(scrapedNews?.resultsBySourceId || {})
+        };
 
-        // Merge Ministry data into detectionData (treating it as another sensor/source)
-        if (ministryIntel.success && ministryIntel.data.length > 0) {
-            // Add ministry alerts to the main data stream
-            // detectCrisis returns { findings: [...] } or array of results? 
-            // Actually detectCrisis returns an aggregated object of API results.
-            // aggregateIntel takes (detectionResults, twitterResults).
-            // We should push ministry findings into detectionData's flow or handle separately.
-
-            // Hack: Append ministry findings to a "custom" source in detectionData if it's an array, 
-            // or pass it explicitly to aggregateIntel if that function supports it. 
-            // Let's check aggregateIntel signature in next step or just append here if detectionData is extensible.
-
-            // Better: Pass it to aggregateIntel if we modify aggregateIntel, OR
-            // just append valid "Ministry" findings to the list that aggregateIntel generates.
-            // But aggregateIntel merges them. Let's see how aggregateIntel works. 
-            // Currently aggregateIntel(detectionData, twitterIntel).
-            // I will update the call to: aggregateIntel(detectionData, twitterIntel, ministryIntel)
-            // But first I need to update the import above.
-        }
-
-        // Step 2: Aggregate all intel findings
         io.emit('detection_status', { step: 2, message: 'Aggregating intelligence findings...', progress: 40 });
 
-        // Pass ministry data to aggregator
-        const aggregatedIntel = aggregateIntel(detectionData, twitterIntel, ministryIntel, scrapedNews);
+        const aggregatedIntel = aggregateIntel({
+            region,
+            sourceResults
+        });
 
         // Step 3: Save findings to database
         io.emit('detection_status', { step: 3, message: 'Saving findings to database...', progress: 60 });
@@ -156,7 +161,8 @@ router.post('/detect', async (req, res) => {
             findings: aggregatedIntel.findings,
             summary: aggregatedIntel.summary,
             recommendations,
-            sources: aggregatedIntel.sources
+            sources: aggregatedIntel.sources,
+            source_selection: sourceSelection
         });
 
         res.json({
@@ -165,7 +171,8 @@ router.post('/detect', async (req, res) => {
             region,
             findings: aggregatedIntel.findings,
             recommendations,
-            summary: aggregatedIntel.summary
+            summary: aggregatedIntel.summary,
+            source_selection: sourceSelection
         });
 
     } catch (error) {

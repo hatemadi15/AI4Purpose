@@ -1,23 +1,24 @@
 import { useState } from 'react';
+import SystemIcon from './SystemIcon';
 
 const EVENT_TYPES = [
-    { value: 'EARTHQUAKE', label: '🌍 Earthquake' },
-    { value: 'AIRSTRIKE', label: '💥 Airstrike' },
-    { value: 'MISSILE_ATTACK', label: '🚀 Missile Attack' },
-    { value: 'EXPLOSION', label: '💣 Explosion' },
-    { value: 'FLOOD', label: '🌊 Flood' },
-    { value: 'WILDFIRE', label: '🔥 Wildfire' },
-    { value: 'SEVERE_WEATHER', label: '⛈️ Severe Weather' },
-    { value: 'SECURITY_INCIDENT', label: '⚠️ Security Incident' },
-    { value: 'HUMANITARIAN', label: '🏥 Humanitarian Crisis' },
-    { value: 'OTHER', label: '📢 Other' }
+    { value: 'EARTHQUAKE', label: 'Earthquake' },
+    { value: 'AIRSTRIKE', label: 'Airstrike' },
+    { value: 'MISSILE_ATTACK', label: 'Missile attack' },
+    { value: 'EXPLOSION', label: 'Explosion' },
+    { value: 'FLOOD', label: 'Flood' },
+    { value: 'WILDFIRE', label: 'Wildfire' },
+    { value: 'SEVERE_WEATHER', label: 'Severe weather' },
+    { value: 'SECURITY_INCIDENT', label: 'Security incident' },
+    { value: 'HUMANITARIAN', label: 'Humanitarian crisis' },
+    { value: 'OTHER', label: 'Other' }
 ];
 
 const SEVERITY_LEVELS = [
-    { value: 'LOW', label: 'Low', color: 'text-green-400' },
-    { value: 'MEDIUM', label: 'Medium', color: 'text-yellow-400' },
-    { value: 'HIGH', label: 'High', color: 'text-orange-400' },
-    { value: 'CRITICAL', label: 'Critical', color: 'text-red-400' }
+    { value: 'LOW', label: 'Low' },
+    { value: 'MEDIUM', label: 'Medium' },
+    { value: 'HIGH', label: 'High' },
+    { value: 'CRITICAL', label: 'Critical' }
 ];
 
 function ManualAlertModal({ isOpen, onClose, onSubmit }) {
@@ -38,7 +39,7 @@ function ManualAlertModal({ isOpen, onClose, onSubmit }) {
 
     const handleChange = (e) => {
         const { name, value } = e.target;
-        setFormData(prev => ({ ...prev, [name]: value }));
+        setFormData((prev) => ({ ...prev, [name]: value }));
     };
 
     const handleSubmit = async (e) => {
@@ -53,8 +54,8 @@ function ManualAlertModal({ isOpen, onClose, onSubmit }) {
                 affected_radius_km: parseFloat(formData.affected_radius_km),
                 intel_sources: formData.intel_sources
                     .split(',')
-                    .map(s => s.trim())
-                    .filter(s => s)
+                    .map((source) => source.trim())
+                    .filter(Boolean)
             };
             await onSubmit(submitData);
             onClose();
@@ -66,182 +67,155 @@ function ManualAlertModal({ isOpen, onClose, onSubmit }) {
     };
 
     return (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-            <div className="glass-card w-full max-w-2xl max-h-[90vh] overflow-y-auto">
-                <div className="p-6">
-                    <div className="flex justify-between items-center mb-6">
-                        <h2 className="text-xl font-bold text-white">Create Manual Alert</h2>
-                        <button
-                            onClick={onClose}
-                            className="text-slate-400 hover:text-white text-2xl"
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
+            <div className="panel w-full max-w-2xl overflow-y-auto">
+                <div className="flex items-center justify-between border-b border-slate-800/80 px-6 py-5">
+                    <div>
+                        <h2 className="text-xl font-semibold text-slate-50">Create Manual Alert</h2>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={onClose}
+                        className="secondary-button px-3 py-2"
+                    >
+                        <SystemIcon name="x" className="h-4 w-4" />
+                    </button>
+                </div>
+
+                <form onSubmit={handleSubmit} className="space-y-5 px-6 py-6">
+                    <div>
+                        <label className="section-title">Event Type</label>
+                        <select
+                            name="event_type"
+                            value={formData.event_type}
+                            onChange={handleChange}
+                            className="surface-input mt-2"
                         >
-                            ×
-                        </button>
+                            {EVENT_TYPES.map((type) => (
+                                <option key={type.value} value={type.value}>
+                                    {type.label}
+                                </option>
+                            ))}
+                        </select>
                     </div>
 
-                    <form onSubmit={handleSubmit} className="space-y-4">
-                        {/* Event Type */}
+                    <div className="grid gap-4 md:grid-cols-2">
                         <div>
-                            <label className="block text-sm font-medium text-slate-300 mb-2">
-                                Event Type
-                            </label>
-                            <select
-                                name="event_type"
-                                value={formData.event_type}
+                            <label className="section-title">Latitude</label>
+                            <input
+                                type="number"
+                                name="lat"
+                                step="0.0001"
+                                value={formData.lat}
                                 onChange={handleChange}
-                                className="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2 text-white focus:border-primary-500 focus:outline-none"
+                                className="surface-input mt-2"
+                            />
+                        </div>
+                        <div>
+                            <label className="section-title">Longitude</label>
+                            <input
+                                type="number"
+                                name="lon"
+                                step="0.0001"
+                                value={formData.lon}
+                                onChange={handleChange}
+                                className="surface-input mt-2"
+                            />
+                        </div>
+                    </div>
+
+                    <div className="grid gap-4 md:grid-cols-2">
+                        <div>
+                            <label className="section-title">Affected Radius (km)</label>
+                            <input
+                                type="number"
+                                name="affected_radius_km"
+                                value={formData.affected_radius_km}
+                                onChange={handleChange}
+                                className="surface-input mt-2"
+                            />
+                        </div>
+                        <div>
+                            <label className="section-title">Severity</label>
+                            <select
+                                name="severity"
+                                value={formData.severity}
+                                onChange={handleChange}
+                                className="surface-input mt-2"
                             >
-                                {EVENT_TYPES.map(type => (
-                                    <option key={type.value} value={type.value}>
-                                        {type.label}
+                                {SEVERITY_LEVELS.map((level) => (
+                                    <option key={level.value} value={level.value}>
+                                        {level.label}
                                     </option>
                                 ))}
                             </select>
                         </div>
+                    </div>
 
-                        {/* Location */}
-                        <div className="grid grid-cols-2 gap-4">
-                            <div>
-                                <label className="block text-sm font-medium text-slate-300 mb-2">
-                                    Latitude
-                                </label>
-                                <input
-                                    type="number"
-                                    name="lat"
-                                    step="0.0001"
-                                    value={formData.lat}
-                                    onChange={handleChange}
-                                    className="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2 text-white focus:border-primary-500 focus:outline-none"
-                                />
-                            </div>
-                            <div>
-                                <label className="block text-sm font-medium text-slate-300 mb-2">
-                                    Longitude
-                                </label>
-                                <input
-                                    type="number"
-                                    name="lon"
-                                    step="0.0001"
-                                    value={formData.lon}
-                                    onChange={handleChange}
-                                    className="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2 text-white focus:border-primary-500 focus:outline-none"
-                                />
-                            </div>
-                        </div>
+                    <div>
+                        <label className="section-title">Alert Message</label>
+                        <textarea
+                            name="message"
+                            value={formData.message}
+                            onChange={handleChange}
+                            rows={4}
+                            required
+                            placeholder="Enter the alert message (will be auto-translated to 5 languages)"
+                            className="surface-input mt-2 resize-none"
+                        />
+                    </div>
 
-                        {/* Radius and Severity */}
-                        <div className="grid grid-cols-2 gap-4">
-                            <div>
-                                <label className="block text-sm font-medium text-slate-300 mb-2">
-                                    Affected Radius (km)
-                                </label>
-                                <input
-                                    type="number"
-                                    name="affected_radius_km"
-                                    value={formData.affected_radius_km}
-                                    onChange={handleChange}
-                                    className="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2 text-white focus:border-primary-500 focus:outline-none"
-                                />
-                            </div>
-                            <div>
-                                <label className="block text-sm font-medium text-slate-300 mb-2">
-                                    Severity
-                                </label>
-                                <select
-                                    name="severity"
-                                    value={formData.severity}
-                                    onChange={handleChange}
-                                    className="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2 text-white focus:border-primary-500 focus:outline-none"
-                                >
-                                    {SEVERITY_LEVELS.map(level => (
-                                        <option key={level.value} value={level.value}>
-                                            {level.label}
-                                        </option>
-                                    ))}
-                                </select>
-                            </div>
-                        </div>
-
-                        {/* Alert Message */}
+                    <div className="grid gap-4 md:grid-cols-2">
                         <div>
-                            <label className="block text-sm font-medium text-slate-300 mb-2">
-                                Alert Message <span className="text-red-400">*</span>
-                            </label>
-                            <textarea
-                                name="message"
-                                value={formData.message}
+                            <label className="section-title">Analyst Name</label>
+                            <input
+                                type="text"
+                                name="analyst_name"
+                                value={formData.analyst_name}
                                 onChange={handleChange}
-                                rows={3}
-                                required
-                                placeholder="Enter the alert message (will be auto-translated to 5 languages)"
-                                className="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2 text-white focus:border-primary-500 focus:outline-none resize-none"
+                                placeholder="Your name"
+                                className="surface-input mt-2"
                             />
                         </div>
-
-                        {/* Analyst Info */}
-                        <div className="grid grid-cols-2 gap-4">
-                            <div>
-                                <label className="block text-sm font-medium text-slate-300 mb-2">
-                                    Analyst Name
-                                </label>
-                                <input
-                                    type="text"
-                                    name="analyst_name"
-                                    value={formData.analyst_name}
-                                    onChange={handleChange}
-                                    placeholder="Your name"
-                                    className="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2 text-white focus:border-primary-500 focus:outline-none"
-                                />
-                            </div>
-                            <div>
-                                <label className="block text-sm font-medium text-slate-300 mb-2">
-                                    Intel Sources (comma separated)
-                                </label>
-                                <input
-                                    type="text"
-                                    name="intel_sources"
-                                    value={formData.intel_sources}
-                                    onChange={handleChange}
-                                    placeholder="@sentdefender, Local report"
-                                    className="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2 text-white focus:border-primary-500 focus:outline-none"
-                                />
-                            </div>
-                        </div>
-
-                        {/* Notes */}
                         <div>
-                            <label className="block text-sm font-medium text-slate-300 mb-2">
-                                Internal Notes
-                            </label>
-                            <textarea
-                                name="analyst_notes"
-                                value={formData.analyst_notes}
+                            <label className="section-title">Intel Sources (comma separated)</label>
+                            <input
+                                type="text"
+                                name="intel_sources"
+                                value={formData.intel_sources}
                                 onChange={handleChange}
-                                rows={2}
-                                placeholder="Optional notes for internal reference"
-                                className="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2 text-white focus:border-primary-500 focus:outline-none resize-none"
+                                placeholder="@sentdefender, Local report"
+                                className="surface-input mt-2"
                             />
                         </div>
+                    </div>
 
-                        {/* Actions */}
-                        <div className="flex gap-4 pt-4">
-                            <button
-                                type="button"
-                                onClick={onClose}
-                                className="flex-1 py-3 px-4 bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-colors"
-                            >
-                                Cancel
-                            </button>
-                            <button
-                                type="submit"
-                                disabled={isSubmitting || !formData.message}
-                                className="flex-1 py-3 px-4 bg-primary-600 hover:bg-primary-500 text-white rounded-lg font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                            >
-                                {isSubmitting ? 'Creating...' : 'Create Alert'}
-                            </button>
-                        </div>
-                    </form>
-                </div>
+                    <div>
+                        <label className="section-title">Internal Notes</label>
+                        <textarea
+                            name="analyst_notes"
+                            value={formData.analyst_notes}
+                            onChange={handleChange}
+                            rows={3}
+                            placeholder="Optional notes for internal reference"
+                            className="surface-input mt-2 resize-none"
+                        />
+                    </div>
+
+                    <div className="flex flex-wrap gap-3 pt-2">
+                        <button type="button" onClick={onClose} className="secondary-button flex-1">
+                            <span>Cancel</span>
+                        </button>
+                        <button
+                            type="submit"
+                            disabled={isSubmitting || !formData.message}
+                            className="command-button flex-1"
+                        >
+                            <SystemIcon name="plus" className="h-4 w-4" />
+                            <span>{isSubmitting ? 'Creating...' : 'Create Alert'}</span>
+                        </button>
+                    </div>
+                </form>
             </div>
         </div>
     );

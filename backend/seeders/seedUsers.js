@@ -1,3 +1,6 @@
+const { loadBackendEnv } = require('../config/runtime');
+loadBackendEnv();
+
 const { sequelize, User } = require('../models');
 
 // Demo users in Beirut area (lat 33.85-33.95, lon 35.45-35.55)

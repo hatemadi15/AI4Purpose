@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { getUsers, subscribeUser, getVapidPublicKey } from '../services/api';
 import useSocket from '../hooks/useSocket';
+import BrandLogo from '../components/BrandLogo';
+import SystemIcon from '../components/SystemIcon';
 
 function urlBase64ToUint8Array(base64String) {
     const padding = '='.repeat((4 - base64String.length % 4) % 4);
@@ -39,26 +41,29 @@ function UserMobileView() {
     }, [selectedUser, joinUser]);
 
     useEffect(() => {
-        if (socket && selectedUser) {
-            socket.on('user_alert', (data) => {
-                if (data.userId && String(data.userId) !== String(selectedUser.id)) {
-                    return;
-                }
-                const notification = {
-                    id: Date.now(),
-                    title: `⚠️ ${data.alert?.event_type || 'Alert'}`,
-                    body: data.message || `Alert for ${data.alert?.region || 'your area'}`,
-                    time: new Date().toLocaleTimeString(),
-                    severity: data.alert?.severity,
-                    zone: data.zone
-                };
-                setNotifications(prev => [notification, ...prev]);
-            });
+        if (!socket || !selectedUser) return undefined;
 
-            return () => {
-                socket.off('user_alert');
+        const handleUserAlert = (data) => {
+            if (data.userId && String(data.userId) !== String(selectedUser.id)) {
+                return;
+            }
+
+            const notification = {
+                id: Date.now(),
+                title: data.alert?.event_type || 'Alert',
+                body: data.message || `Alert for ${data.alert?.region || 'your area'}`,
+                time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                severity: data.alert?.severity,
+                zone: data.zone
             };
-        }
+            setNotifications((prev) => [notification, ...prev]);
+        };
+
+        socket.on('user_alert', handleUserAlert);
+
+        return () => {
+            socket.off('user_alert', handleUserAlert);
+        };
     }, [socket, selectedUser]);
 
     const loadUsers = async () => {
@@ -92,22 +97,18 @@ function UserMobileView() {
         setError(null);
 
         try {
-            // Check if notifications are supported
             if (!('Notification' in window)) {
                 throw new Error('Push notifications not supported in this browser');
             }
 
-            // Request permission
             const permission = await Notification.requestPermission();
             if (permission !== 'granted') {
                 throw new Error('Notification permission denied');
             }
 
-            // Register service worker
             const registration = await navigator.serviceWorker.register('/service-worker.js');
             await navigator.serviceWorker.ready;
 
-            // Get VAPID public key
             const vapidResponse = await getVapidPublicKey();
             const vapidPublicKey = vapidResponse.data.publicKey;
 
@@ -115,29 +116,23 @@ function UserMobileView() {
                 throw new Error('VAPID public key not configured');
             }
 
-            // Subscribe to push
             const subscription = await registration.pushManager.subscribe({
                 userVisibleOnly: true,
                 applicationServerKey: urlBase64ToUint8Array(vapidPublicKey)
             });
 
-            // Save subscription to backend
             await subscribeUser(selectedUser.id, subscription.toJSON());
 
             setSubscriptionStatus('enabled');
-
-            // Update local user data
-            setSelectedUser(prev => ({
+            setSelectedUser((prev) => ({
                 ...prev,
                 push_subscription: subscription.toJSON()
             }));
 
-            // Show success notification
-            new Notification('MedAlert Notifications Enabled', {
+            new Notification('Notifications Enabled', {
                 body: 'You will now receive crisis alerts',
-                icon: '/favicon.svg'
+                icon: '/tanbih-mark.svg'
             });
-
         } catch (err) {
             console.error('Subscription error:', err);
             setError(err.message);
@@ -149,164 +144,160 @@ function UserMobileView() {
 
     if (loading) {
         return (
-            <div className="max-w-md mx-auto flex items-center justify-center h-96">
-                <div className="text-slate-400">Loading...</div>
+            <div className="panel flex h-96 items-center justify-center">
+                <div className="text-sm text-slate-400">Loading user view</div>
             </div>
         );
     }
 
     return (
-        <div className="max-w-md mx-auto">
-            {/* Header */}
-            <div className="text-center mb-8">
-                <div className="text-5xl mb-4">📱</div>
-                <h1 className="text-2xl font-bold text-white mb-2">User Mobile View</h1>
-                <p className="text-slate-400">Receive push notifications for crisis alerts</p>
-            </div>
-
-            {/* User Selector */}
-            <div className="glass-card p-4 mb-6">
-                <label className="text-sm text-slate-300 mb-2 block">Select Demo User</label>
-                <select
-                    value={selectedUser?.id || ''}
-                    onChange={(e) => {
-                        const user = users.find(u => u.id === parseInt(e.target.value));
-                        setSelectedUser(user);
-                    }}
-                    className="w-full px-4 py-3 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-primary-500"
-                >
-                    {users.map(user => (
-                        <option key={user.id} value={user.id}>
-                            {user.name} ({user.preferred_language?.toUpperCase()})
-                        </option>
-                    ))}
-                </select>
-            </div>
-
-            {/* User Info Card */}
-            {selectedUser && (
-                <div className="glass-card p-4 mb-6">
-                    <div className="flex items-start gap-4">
-                        <div className="w-12 h-12 rounded-full bg-gradient-to-br from-primary-400 to-primary-600 flex items-center justify-center text-white font-bold text-lg">
-                            {selectedUser.name?.charAt(0)}
-                        </div>
-                        <div className="flex-1">
-                            <h3 className="text-white font-semibold">{selectedUser.name}</h3>
-                            <p className="text-sm text-slate-400">{selectedUser.email}</p>
-                            <div className="flex items-center gap-2 mt-2 text-xs text-slate-500">
-                                <span>📍 {parseFloat(selectedUser.lat).toFixed(4)}, {parseFloat(selectedUser.lon).toFixed(4)}</span>
-                            </div>
-                        </div>
-                        <div className="text-right">
-                            <div className="text-xs text-slate-400 mb-1">Language</div>
-                            <div className="px-2 py-1 bg-slate-700 rounded text-sm text-white">
-                                {selectedUser.preferred_language?.toUpperCase()}
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
-
-            {/* Notification Enable Button */}
-            <div className="glass-card p-6 mb-6">
-                <div className="flex items-center justify-between mb-4">
+        <div className="mx-auto max-w-3xl space-y-6">
+            <section className="panel p-6 md:p-8">
+                <div className="flex flex-col gap-6 md:flex-row md:items-start md:justify-between">
                     <div>
-                        <h3 className="text-white font-semibold">Push Notifications</h3>
-                        <p className="text-sm text-slate-400">Receive real-time crisis alerts</p>
+                        <BrandLogo size="lg" subtitle="" />
+                        <div className="mt-6">
+                            <h1 className="text-3xl font-semibold text-slate-50">User Mobile View</h1>
+                            <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-400">Receive push notifications for crisis alerts</p>
+                        </div>
                     </div>
-                    <div className={`flex items-center gap-2 px-3 py-1 rounded-full ${subscriptionStatus === 'enabled'
-                            ? 'bg-green-500/20 text-green-400'
-                            : 'bg-slate-700 text-slate-400'
-                        }`}>
-                        <div className={`w-2 h-2 rounded-full ${subscriptionStatus === 'enabled' ? 'bg-green-400' : 'bg-slate-500'
-                            }`}></div>
-                        <span className="text-sm">
-                            {subscriptionStatus === 'enabled' ? 'Enabled' : 'Disabled'}
-                        </span>
-                    </div>
-                </div>
 
-                {subscriptionStatus !== 'enabled' && (
-                    <button
-                        onClick={enableNotifications}
-                        disabled={subscribing}
-                        className="w-full py-4 rounded-xl glow-button text-white font-bold text-lg transition-all disabled:opacity-50"
-                    >
-                        {subscribing ? (
-                            <span className="flex items-center justify-center gap-2">
-                                <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
-                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                                </svg>
-                                Enabling...
-                            </span>
-                        ) : (
-                            <span className="flex items-center justify-center gap-2">
-                                🔔 Enable Notifications
-                            </span>
-                        )}
-                    </button>
-                )}
-
-                {subscriptionStatus === 'enabled' && (
-                    <div className="text-center text-green-400 py-2">
-                        ✅ You will receive push notifications for alerts in your area
-                    </div>
-                )}
-
-                {error && (
-                    <div className="mt-4 p-3 bg-red-500/20 border border-red-500/50 rounded-lg text-red-400 text-sm">
-                        {error}
-                    </div>
-                )}
-            </div>
-
-            {/* Connection Status */}
-            <div className="glass-card p-4 mb-6">
-                <div className="flex items-center justify-between">
-                    <span className="text-slate-400">Real-time Connection</span>
-                    <div className={`flex items-center gap-2 ${isConnected ? 'text-green-400' : 'text-red-400'}`}>
-                        <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-400 animate-pulse' : 'bg-red-400'}`}></div>
+                    <div className={`rounded-full border px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] ${
+                        isConnected
+                            ? 'border-emerald-400/25 bg-emerald-400/10 text-emerald-200'
+                            : 'border-red-400/25 bg-red-400/10 text-red-200'
+                    }`}>
                         {isConnected ? 'Connected' : 'Disconnected'}
                     </div>
                 </div>
-            </div>
+            </section>
 
-            {/* Notification History */}
-            <div className="glass-card p-4">
-                <h3 className="text-white font-semibold mb-4">Notification History</h3>
+            <section className="grid gap-6 lg:grid-cols-[0.9fr,1.1fr]">
+                <div className="panel p-6">
+                    <div className="section-title">User</div>
+                    <label className="mt-3 block text-sm text-slate-400">Select Demo User</label>
+                    <select
+                        value={selectedUser?.id || ''}
+                        onChange={(e) => {
+                            const user = users.find((item) => item.id === parseInt(e.target.value, 10));
+                            setSelectedUser(user);
+                        }}
+                        className="surface-input mt-2"
+                    >
+                        {users.map((user) => (
+                            <option key={user.id} value={user.id}>
+                                {user.name} ({user.preferred_language?.toUpperCase()})
+                            </option>
+                        ))}
+                    </select>
+
+                    {selectedUser && (
+                        <div className="mt-5 rounded-2xl border border-slate-800 bg-slate-950/45 p-4">
+                            <div className="flex items-start gap-4">
+                                <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-cyan-300/20 bg-cyan-300/10 text-lg font-semibold text-cyan-100">
+                                    {selectedUser.name?.charAt(0)}
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                    <div className="text-sm font-semibold text-slate-100">{selectedUser.name}</div>
+                                    <div className="mt-1 text-xs text-slate-400">{selectedUser.email}</div>
+                                    <div className="mt-3 flex items-center gap-2 text-xs text-slate-500">
+                                        <SystemIcon name="pin" className="h-3.5 w-3.5" />
+                                        <span>
+                                            {parseFloat(selectedUser.lat).toFixed(4)}, {parseFloat(selectedUser.lon).toFixed(4)}
+                                        </span>
+                                    </div>
+                                </div>
+                                <div className="rounded-full border border-slate-800 bg-slate-950/60 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-slate-300">
+                                    {selectedUser.preferred_language?.toUpperCase()}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+
+                <div className="panel p-6">
+                    <div className="flex items-center justify-between gap-3">
+                        <div>
+                            <div className="section-title">Push Notifications</div>
+                            <h2 className="mt-2 text-xl font-semibold text-slate-50">Receive real-time crisis alerts</h2>
+                        </div>
+                        <div className={`rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] ${
+                            subscriptionStatus === 'enabled'
+                                ? 'border-emerald-400/25 bg-emerald-400/10 text-emerald-200'
+                                : 'border-slate-700 bg-slate-950/60 text-slate-400'
+                        }`}>
+                            {subscriptionStatus === 'enabled' ? 'Enabled' : 'Disabled'}
+                        </div>
+                    </div>
+
+                    {subscriptionStatus !== 'enabled' ? (
+                        <button
+                            type="button"
+                            onClick={enableNotifications}
+                            disabled={subscribing}
+                            className="command-button mt-6 w-full"
+                        >
+                            <SystemIcon name="bell" className="h-4 w-4" />
+                            <span>{subscribing ? 'Enabling...' : 'Enable Notifications'}</span>
+                        </button>
+                    ) : (
+                        <div className="mt-6 rounded-2xl border border-emerald-400/25 bg-emerald-400/10 px-4 py-3 text-sm text-emerald-100">
+                            You will receive push notifications for alerts in your area
+                        </div>
+                    )}
+
+                    {error && (
+                        <div className="mt-4 rounded-2xl border border-red-400/25 bg-red-400/10 px-4 py-3 text-sm text-red-100">
+                            {error}
+                        </div>
+                    )}
+                </div>
+            </section>
+
+            <section className="panel p-6">
+                <div className="flex items-center justify-between gap-3">
+                    <div>
+                        <div className="section-title">Notification History</div>
+                        <h2 className="mt-2 text-xl font-semibold text-slate-50">Notifications</h2>
+                    </div>
+                    <SystemIcon name="mobile" className="h-5 w-5 text-cyan-200" />
+                </div>
 
                 {notifications.length === 0 ? (
-                    <div className="text-center py-8">
-                        <div className="text-4xl mb-2">🔕</div>
-                        <p className="text-slate-400">No notifications yet</p>
-                        <p className="text-xs text-slate-500 mt-2">
-                            Alerts will appear here when approved
-                        </p>
+                    <div className="mt-6 rounded-2xl border border-slate-800 bg-slate-950/45 p-6 text-center">
+                        <SystemIcon name="bell" className="mx-auto h-8 w-8 text-slate-600" />
+                        <div className="mt-4 text-sm font-semibold text-slate-200">No notifications yet</div>
+                        <div className="mt-2 text-xs text-slate-500">Alerts will appear here when approved</div>
                     </div>
                 ) : (
-                    <div className="space-y-3">
-                        {notifications.map(notif => (
+                    <div className="mt-6 space-y-3">
+                        {notifications.map((notification) => (
                             <div
-                                key={notif.id}
-                                className="p-3 bg-slate-800/50 rounded-lg border-l-4 border-primary-500"
+                                key={notification.id}
+                                className="rounded-2xl border border-slate-800 bg-slate-950/45 p-4"
                             >
-                                <div className="flex items-center justify-between mb-1">
-                                    <span className="text-white font-medium">{notif.title}</span>
-                                    <span className="text-xs text-slate-500">{notif.time}</span>
+                                <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                                    <div>
+                                        <div className="flex flex-wrap items-center gap-2">
+                                            <div className="text-sm font-semibold text-slate-100">{notification.title}</div>
+                                            {notification.severity && (
+                                                <span className="rounded-full border border-slate-700 px-2 py-0.5 text-[10px] uppercase tracking-[0.16em] text-slate-300">
+                                                    {notification.severity}
+                                                </span>
+                                            )}
+                                        </div>
+                                        <div className="mt-2 text-sm text-slate-400">{notification.body}</div>
+                                    </div>
+                                    <div className="text-right text-xs text-slate-500">
+                                        <div>{notification.time}</div>
+                                        {notification.zone && <div className="mt-1">{notification.zone}</div>}
+                                    </div>
                                 </div>
-                                <p className="text-sm text-slate-400">{notif.body}</p>
                             </div>
                         ))}
                     </div>
                 )}
-            </div>
-
-            {/* Info */}
-            <div className="mt-6 text-center text-xs text-slate-500">
-                <p>This simulates a mobile user receiving crisis alerts.</p>
-                <p className="mt-1">Enable notifications and approve an alert to test.</p>
-            </div>
+            </section>
         </div>
     );
 }
