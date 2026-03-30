@@ -85,6 +85,6 @@ test('calculateVerificationOutcome excludes disabled sources from denominator an
     assert.equal(outcome.confirmedSources, 1);
     assert.equal(outcome.perplexityTotal, 0);
     assert.equal(outcome.twitterFound, 0);
-    assert.equal(outcome.mediaBonus, 0);
-    assert.equal(outcome.finalScore, 25);
+    assert.equal(outcome.mediaBonus, 20);
+    assert.equal(outcome.finalScore, 45);
 });

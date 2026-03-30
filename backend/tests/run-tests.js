@@ -1,13 +1,28 @@
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
+
+const TEST_DB_PATH = path.join(os.tmpdir(), 'medalert-run-tests.sqlite');
+fs.rmSync(TEST_DB_PATH, { force: true });
+process.env.DATABASE_URL = `sqlite:${TEST_DB_PATH}`;
 
 const { getSourceConfig, resolveSourceSelection } = require('../config/sourceCatalog');
 const { BACKEND_ROOT, REPO_ROOT, resolveSqliteOptions, resolveSqliteStoragePath } = require('../config/runtime');
+const { sequelize, Alert, IntelFinding, MediaEvidence } = require('../models');
 const { runDetectionSources, summarizeDetectionResults } = require('../services/detectionService');
 const { aggregateIntel } = require('../services/intelService');
 const { calculateVerificationOutcome, runVerificationSources } = require('../services/verificationService');
+const {
+    attachUploadedMediaToFinding,
+    copyFindingMediaToAlert,
+    createRemoteMediaEvidence,
+    extractImageCandidates,
+    purgeExpiredMediaEvidence,
+    syncAlertRemoteMedia
+} = require('../services/mediaService');
+const { createApp, createRealtimeServer } = require('../server');
 
-const ORIGINAL_ENV = { ...process.env };
 const RELEVANT_ENV_KEYS = [
     'OPENWEATHER_API_KEY',
     'TOMORROW_IO_API_KEY',
@@ -22,11 +37,7 @@ const RELEVANT_ENV_KEYS = [
 
 function applyEnv(overrides = {}) {
     for (const key of RELEVANT_ENV_KEYS) {
-        if (Object.prototype.hasOwnProperty.call(ORIGINAL_ENV, key)) {
-            process.env[key] = ORIGINAL_ENV[key];
-        } else {
-            delete process.env[key];
-        }
+        delete process.env[key];
     }
 
     for (const [key, value] of Object.entries(overrides)) {
@@ -36,6 +47,35 @@ function applyEnv(overrides = {}) {
             process.env[key] = value;
         }
     }
+}
+
+async function resetTestDatabase() {
+    await sequelize.sync({ force: true });
+}
+
+async function withHttpServer(run) {
+    const app = createApp();
+    const { server, io } = createRealtimeServer(app);
+
+    await new Promise((resolve) => {
+        server.listen(0, '127.0.0.1', resolve);
+    });
+
+    const address = server.address();
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+
+    try {
+        await run(baseUrl);
+    } finally {
+        io.close();
+        await new Promise((resolve) => server.close(resolve));
+    }
+}
+
+function createImageFormData({ fieldName = 'images[]', filename = 'evidence.png', type = 'image/png', body = 'fake-image' } = {}) {
+    const formData = new FormData();
+    formData.append(fieldName, new Blob([body], { type }), filename);
+    return formData;
 }
 
 function createEarthquakeFeature({ magnitude = 4.8, place = 'Near Beirut', time = Date.now() } = {}) {
@@ -51,6 +91,32 @@ function createEarthquakeFeature({ magnitude = 4.8, place = 'Near Beirut', time 
             coordinates: [35.5, 33.9, 12]
         }
     };
+}
+
+async function createTestAlert(overrides = {}) {
+    return Alert.create({
+        event_type: 'EARTHQUAKE',
+        lat: 33.8938,
+        lon: 35.5018,
+        affected_radius_km: 30,
+        severity: 'MEDIUM',
+        alert_messages: {},
+        affected_users_count: { critical: 0, warning: 0, watch: 0 },
+        region: 'Lebanon',
+        ...overrides
+    });
+}
+
+async function createTestFinding(overrides = {}) {
+    return IntelFinding.create({
+        finding_id: `finding-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        type: 'NEWS',
+        source: 'Test Source',
+        source_type: 'news',
+        title: 'Test finding',
+        region: 'Lebanon',
+        ...overrides
+    });
 }
 
 async function runCase(name, fn) {
@@ -277,8 +343,215 @@ async function main() {
         assert.equal(outcome.confirmedSources, 1);
         assert.equal(outcome.perplexityTotal, 0);
         assert.equal(outcome.twitterFound, 0);
-        assert.equal(outcome.mediaBonus, 0);
-        assert.equal(outcome.finalScore, 25);
+        assert.equal(outcome.mediaBonus, 20);
+        assert.equal(outcome.finalScore, 45);
+    });
+
+    await runCase('extractImageCandidates normalizes supported image fields', async () => {
+        const images = extractImageCandidates({
+            image: ' https://example.com/news.jpg ',
+            image_url: 'http://example.com/secondary.png',
+            preview_image_url: 'ftp://ignore.me/image.png',
+            raw_data: {
+                image: 'https://example.com/raw.webp'
+            }
+        });
+
+        assert.deepEqual(images, [
+            'https://example.com/news.jpg',
+            'http://example.com/secondary.png',
+            'https://example.com/raw.webp'
+        ]);
+    });
+
+    await runCase('syncAlertRemoteMedia stores twitter and news media against alerts', async () => {
+        await resetTestDatabase();
+        const alert = await createTestAlert();
+
+        await syncAlertRemoteMedia({
+            alertId: alert.id,
+            twitterImageUrls: ['https://example.com/twitter-photo.jpg'],
+            newsImageUrls: ['https://example.com/news-photo.jpg']
+        });
+
+        const media = await MediaEvidence.findAll({
+            where: { alert_id: alert.id },
+            order: [['origin', 'ASC']]
+        });
+
+        assert.equal(media.length, 2);
+        assert.deepEqual(media.map((record) => record.origin), ['news', 'twitter']);
+    });
+
+    await runCase('copyFindingMediaToAlert carries existing finding evidence forward', async () => {
+        await resetTestDatabase();
+        const finding = await createTestFinding();
+        const alert = await createTestAlert();
+
+        await createRemoteMediaEvidence({
+            intelFindingId: finding.id,
+            origin: 'news',
+            sourceUrl: 'https://example.com/copied-image.jpg'
+        });
+
+        const copied = await copyFindingMediaToAlert(finding.id, alert.id);
+        const alertMedia = await MediaEvidence.findAll({ where: { alert_id: alert.id } });
+
+        assert.equal(copied.length, 1);
+        assert.equal(alertMedia.length, 1);
+        assert.equal(alertMedia[0].source_url, 'https://example.com/copied-image.jpg');
+    });
+
+    await runCase('purgeExpiredMediaEvidence removes expired uploaded files and marks records expired', async () => {
+        await resetTestDatabase();
+        const alert = await createTestAlert();
+        const expiredFilePath = path.join(BACKEND_ROOT, 'data', 'media-temp', `expired-${Date.now()}.png`);
+
+        fs.mkdirSync(path.dirname(expiredFilePath), { recursive: true });
+        fs.writeFileSync(expiredFilePath, 'expired-file');
+
+        const record = await MediaEvidence.create({
+            alert_id: alert.id,
+            origin: 'analyst_upload',
+            storage_path: path.relative(BACKEND_ROOT, expiredFilePath),
+            mime_type: 'image/png',
+            file_size_bytes: 12,
+            sha256: 'expired-file',
+            expires_at: new Date(Date.now() - 1000)
+        });
+
+        const purgedCount = await purgeExpiredMediaEvidence();
+        await record.reload();
+
+        assert.equal(purgedCount, 1);
+        assert.equal(fs.existsSync(expiredFilePath), false);
+        assert.equal(record.analysis_status, 'EXPIRED');
+        assert.equal(record.storage_path, null);
+    });
+
+    await runCase('findings history persists and excludes alert-created items by default', async () => {
+        await resetTestDatabase();
+
+        const persistedFinding = await createTestFinding({
+            finding_id: 'finding-history-visible',
+            title: 'Persisted visible finding',
+            region: 'Lebanon',
+            severity: 'HIGH',
+            posted_at: new Date('2026-03-28T10:00:00.000Z')
+        });
+
+        await createTestFinding({
+            finding_id: 'finding-history-alerted',
+            title: 'Persisted alerted finding',
+            region: 'Lebanon',
+            severity: 'CRITICAL',
+            alert_created: true
+        });
+
+        await createRemoteMediaEvidence({
+            intelFindingId: persistedFinding.id,
+            origin: 'news',
+            sourceUrl: 'https://example.com/persisted-visible.jpg'
+        });
+
+        await withHttpServer(async (baseUrl) => {
+            const defaultResponse = await fetch(`${baseUrl}/api/detect/findings?region=Lebanon`);
+            assert.equal(defaultResponse.status, 200);
+            const defaultJson = await defaultResponse.json();
+
+            assert.equal(defaultJson.findings.length, 1);
+            assert.equal(defaultJson.findings[0].finding_id, 'finding-history-visible');
+            assert.equal(defaultJson.findings[0].media_count, 1);
+
+            await createTestFinding({
+                finding_id: 'finding-history-new-search',
+                title: 'Persisted after another search',
+                region: 'Lebanon',
+                severity: 'LOW',
+                posted_at: new Date('2026-03-28T12:00:00.000Z')
+            });
+
+            const updatedResponse = await fetch(`${baseUrl}/api/detect/findings?region=Lebanon`);
+            assert.equal(updatedResponse.status, 200);
+            const updatedJson = await updatedResponse.json();
+
+            assert.deepEqual(
+                updatedJson.findings.map((finding) => finding.finding_id),
+                ['finding-history-visible', 'finding-history-new-search']
+            );
+
+            const includeAlertCreatedResponse = await fetch(`${baseUrl}/api/detect/findings?region=Lebanon&include_alert_created=true`);
+            assert.equal(includeAlertCreatedResponse.status, 200);
+            const includeAlertCreatedJson = await includeAlertCreatedResponse.json();
+
+            assert.deepEqual(
+                includeAlertCreatedJson.findings.map((finding) => finding.finding_id).sort(),
+                ['finding-history-alerted', 'finding-history-new-search', 'finding-history-visible']
+            );
+        });
+    });
+
+    await runCase('finding media routes upload, preview, list, and delete evidence', async () => {
+        await resetTestDatabase();
+        const finding = await createTestFinding({ finding_id: 'finding-route-media' });
+
+        await withHttpServer(async (baseUrl) => {
+            const uploadResponse = await fetch(`${baseUrl}/api/detect/findings/${finding.finding_id}/media`, {
+                method: 'POST',
+                body: createImageFormData()
+            });
+
+            assert.equal(uploadResponse.status, 200);
+            const uploadJson = await uploadResponse.json();
+            assert.equal(uploadJson.media.length, 1);
+
+            const mediaId = uploadJson.media[0].id;
+
+            const contentResponse = await fetch(`${baseUrl}/api/media/${mediaId}/content`);
+            assert.equal(contentResponse.status, 200);
+            assert.equal(contentResponse.headers.get('content-type'), 'image/png');
+
+            const listResponse = await fetch(`${baseUrl}/api/detect/findings/${finding.finding_id}/media`);
+            const listJson = await listResponse.json();
+            assert.equal(listJson.media.length, 1);
+
+            const deleteResponse = await fetch(`${baseUrl}/api/media/${mediaId}`, { method: 'DELETE' });
+            assert.equal(deleteResponse.status, 200);
+
+            const afterDeleteResponse = await fetch(`${baseUrl}/api/detect/findings/${finding.finding_id}/media`);
+            const afterDeleteJson = await afterDeleteResponse.json();
+            assert.equal(afterDeleteJson.media.length, 0);
+        });
+    });
+
+    await runCase('manual alert route accepts multipart images and stores analyst uploads', async () => {
+        await resetTestDatabase();
+
+        await withHttpServer(async (baseUrl) => {
+            const formData = createImageFormData();
+            formData.append('event_type', 'SECURITY_INCIDENT');
+            formData.append('lat', '33.8938');
+            formData.append('lon', '35.5018');
+            formData.append('affected_radius_km', '30');
+            formData.append('severity', 'HIGH');
+            formData.append('message', 'Shelter in place until further notice.');
+            formData.append('analyst_name', 'Route Test');
+            formData.append('intel_sources', JSON.stringify(['Analyst camera']));
+
+            const createResponse = await fetch(`${baseUrl}/api/alerts/manual`, {
+                method: 'POST',
+                body: formData
+            });
+
+            assert.equal(createResponse.status, 200);
+            const createJson = await createResponse.json();
+            assert.ok(createJson.alertId);
+
+            const mediaResponse = await fetch(`${baseUrl}/api/alerts/${createJson.alertId}/media`);
+            const mediaJson = await mediaResponse.json();
+            assert.equal(mediaJson.media.length, 1);
+            assert.equal(mediaJson.media[0].origin, 'analyst_upload');
+        });
     });
 
     if (process.exitCode) {

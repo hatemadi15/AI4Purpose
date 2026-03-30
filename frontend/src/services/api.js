@@ -9,6 +9,10 @@ const api = axios.create({
     }
 });
 
+const multipartApi = axios.create({
+    ...(API_URL ? { baseURL: API_URL } : {})
+});
+
 function delay(ms) {
     return new Promise((resolve) => {
         window.setTimeout(resolve, ms);
@@ -63,6 +67,18 @@ export const createAlertFromFinding = (finding, region, severity = 'MEDIUM', rad
 export const getIntelFindings = (region, limit = 100) =>
     api.get('/api/detect/findings', { params: { region, limit } });
 
+export const getFindingMedia = (findingId) =>
+    api.get(`/api/detect/findings/${encodeURIComponent(findingId)}/media`);
+
+export const uploadFindingMedia = (findingId, files) => {
+    const formData = new FormData();
+    Array.from(files || []).forEach((file) => {
+        formData.append('images[]', file);
+    });
+
+    return multipartApi.post(`/api/detect/findings/${encodeURIComponent(findingId)}/media`, formData);
+};
+
 // Alerts
 export const getAlerts = (status) =>
     api.get('/api/alerts', { params: { status } });
@@ -79,8 +95,59 @@ export const rejectAlert = (id, data) =>
 export const verifyAlert = (id, sourceIds) =>
     api.post(`/api/alerts/${id}/verify`, sourceIds !== undefined ? { source_ids: sourceIds } : {});
 
-export const createManualAlert = (data) =>
-    api.post('/api/alerts/manual', data);
+export const getAlertMedia = (id) =>
+    api.get(`/api/alerts/${id}/media`);
+
+export const uploadAlertMedia = (id, files) => {
+    const formData = new FormData();
+    Array.from(files || []).forEach((file) => {
+        formData.append('images[]', file);
+    });
+
+    return multipartApi.post(`/api/alerts/${id}/media`, formData);
+};
+
+export const deleteMedia = (id) =>
+    api.delete(`/api/media/${id}`);
+
+export const createManualAlert = (data) => {
+    const images = Array.from(data?.images || []);
+    if (images.length === 0) {
+        return api.post('/api/alerts/manual', data);
+    }
+
+    const formData = new FormData();
+    Object.entries(data || {}).forEach(([key, value]) => {
+        if (value == null || key === 'images') {
+            return;
+        }
+
+        if (Array.isArray(value)) {
+            formData.append(key, JSON.stringify(value));
+            return;
+        }
+
+        formData.append(key, String(value));
+    });
+
+    images.forEach((file) => {
+        formData.append('images[]', file);
+    });
+
+    return multipartApi.post('/api/alerts/manual', formData);
+};
+
+export function resolveMediaUrl(url) {
+    if (!url) {
+        return '';
+    }
+
+    if (/^https?:\/\//i.test(url)) {
+        return url;
+    }
+
+    return API_URL ? `${API_URL}${url}` : url;
+}
 
 // Users
 export const getUsers = () =>

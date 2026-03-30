@@ -6,7 +6,6 @@ const {
     resolveSourceSelection
 } = require('../config/sourceCatalog');
 
-const ORIGINAL_ENV = { ...process.env };
 const RELEVANT_ENV_KEYS = [
     'OPENWEATHER_API_KEY',
     'TOMORROW_IO_API_KEY',
@@ -21,11 +20,7 @@ const RELEVANT_ENV_KEYS = [
 
 function applyEnv(overrides = {}) {
     for (const key of RELEVANT_ENV_KEYS) {
-        if (Object.prototype.hasOwnProperty.call(ORIGINAL_ENV, key)) {
-            process.env[key] = ORIGINAL_ENV[key];
-        } else {
-            delete process.env[key];
-        }
+        delete process.env[key];
     }
 
     for (const [key, value] of Object.entries(overrides)) {

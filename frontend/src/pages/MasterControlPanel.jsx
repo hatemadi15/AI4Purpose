@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getSourceConfig, triggerDetection } from '../services/api';
+import { getIntelFindings, getSourceConfig, triggerDetection } from '../services/api';
 import useSocket from '../hooks/useSocket';
 import CountryFlag from '../components/CountryFlag';
 import IntelFindingsPanel from '../components/IntelFindingsPanel';
@@ -96,6 +96,7 @@ function MasterControlPanel() {
     const [currentStep, setCurrentStep] = useState('');
     const [result, setResult] = useState(null);
     const [error, setError] = useState(null);
+    const [persistedFindings, setPersistedFindings] = useState([]);
     const [sourceProviders, setSourceProviders] = useState([]);
     const [selectedSourceIds, setSelectedSourceIds] = useState([]);
     const [sourceConfigLoaded, setSourceConfigLoaded] = useState(false);
@@ -127,6 +128,29 @@ function MasterControlPanel() {
             active = false;
         };
     }, []);
+
+    useEffect(() => {
+        let active = true;
+
+        const loadPersistedFindings = async () => {
+            try {
+                const response = await getIntelFindings(selectedRegion, 200);
+                if (!active) return;
+                if (response.data?.success) {
+                    setPersistedFindings(response.data.findings || []);
+                }
+            } catch (err) {
+                if (!active) return;
+                console.error('Failed to load persisted findings:', err);
+            }
+        };
+
+        loadPersistedFindings();
+
+        return () => {
+            active = false;
+        };
+    }, [selectedRegion]);
 
     useEffect(() => {
         if (!socket) return undefined;
@@ -165,6 +189,7 @@ function MasterControlPanel() {
                 sourceConfigLoaded ? selectedSourceIds : undefined
             );
             setResult(response.data);
+            setPersistedFindings(response.data?.findings || []);
             setIsDetecting(false);
         } catch (err) {
             setError(err.response?.data?.error || err.message);
@@ -182,6 +207,9 @@ function MasterControlPanel() {
 
     const selectedRegionData = REGIONS.find((region) => region.id === selectedRegion) || REGIONS[0];
     const triggerDisabled = isDetecting || (sourceConfigLoaded && selectedSourceIds.length === 0);
+    const visibleFindings = result?.region === selectedRegion ? (result.findings || []) : persistedFindings;
+    const latestFindings = result?.region === selectedRegion ? (result.latest_findings || []) : [];
+    const recommendations = result?.region === selectedRegion ? (result.recommendations || []) : [];
 
     return (
         <div className="space-y-6">
@@ -255,21 +283,7 @@ function MasterControlPanel() {
                         </div>
                     </div>
 
-                    <div className="mt-5">
-                        <div className="metric-card">
-                            <div className="metric-label">Connection</div>
-                            <div className="mt-3 flex items-center gap-3">
-                                <SystemIcon name="signal" className="h-5 w-5 text-cyan-200" />
-                                <div>
-                                    <div className="text-sm font-semibold text-slate-100">
-                                        {isConnected ? 'Real-time Connected' : 'Connecting...'}
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div className="mt-6 space-y-3">
+                    <div className="mt-5 space-y-3">
                         <div className="section-title">Progress Section</div>
                         <div className="grid gap-3 sm:grid-cols-2">
                             {PIPELINE_STEPS.map((step) => (
@@ -305,11 +319,12 @@ function MasterControlPanel() {
 
             <SourceSummary result={result} />
 
-            {result?.findings && (
+            {(visibleFindings.length > 0 || latestFindings.length > 0 || recommendations.length > 0) && (
                 <section>
                     <IntelFindingsPanel
-                        findings={result.findings}
-                        recommendations={result.recommendations}
+                        findings={visibleFindings}
+                        latestFindings={latestFindings}
+                        recommendations={recommendations}
                         region={selectedRegion}
                         onAlertCreated={(data) => {
                             if (data.alertId) {

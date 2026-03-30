@@ -6,6 +6,14 @@ import IntelFindingsPanel from '../components/IntelFindingsPanel';
 import AlertReviewPanel from '../components/AlertReviewPanel';
 import SystemIcon from '../components/SystemIcon';
 
+function getFindingKey(finding) {
+    if (!finding) {
+        return null;
+    }
+
+    return String(finding.finding_id || finding.id || '');
+}
+
 function SeverityBadge({ severity }) {
     const classes = {
         CRITICAL: 'badge-critical',
@@ -70,6 +78,7 @@ function AnalystDashboard() {
     const [loading, setLoading] = useState(true);
     const [showManualModal, setShowManualModal] = useState(false);
     const [intelFindings, setIntelFindings] = useState([]);
+    const [latestIntelFindings, setLatestIntelFindings] = useState([]);
     const [intelRecommendations, setIntelRecommendations] = useState([]);
     const [selectedRegion, setSelectedRegion] = useState('Lebanon');
 
@@ -84,6 +93,7 @@ function AnalystDashboard() {
             const response = await getIntelFindings(null, 100);
             if (response.data.success) {
                 setIntelFindings(response.data.findings);
+                setLatestIntelFindings([]);
             }
         } catch (err) {
             console.error('Failed to load intel findings:', err);
@@ -113,20 +123,42 @@ function AnalystDashboard() {
 
         const handleIntelFindings = (data) => {
             setIntelFindings(data.findings || []);
+            setLatestIntelFindings(data.latest_findings || []);
             setIntelRecommendations(data.recommendations || []);
             setSelectedRegion(data.region || 'Lebanon');
+        };
+
+        const handleIntelFindingsUpdated = (data) => {
+            if (Array.isArray(data.findings)) {
+                setIntelFindings(data.findings);
+            }
+
+            const removedFindingId = data.removed_finding_id ? String(data.removed_finding_id) : null;
+            if (removedFindingId) {
+                setLatestIntelFindings((prev) => prev.filter((finding) => getFindingKey(finding) !== removedFindingId));
+                setIntelRecommendations((prev) => prev.filter((recommendation) => {
+                    const primaryFinding = recommendation.primary_finding || recommendation;
+                    return getFindingKey(primaryFinding) !== removedFindingId;
+                }));
+            }
+
+            if (data.region) {
+                setSelectedRegion(data.region);
+            }
         };
 
         socket.on('new_alert_for_review', handleNewAlert);
         socket.on('alert_approved', handleAlertApproved);
         socket.on('alert_rejected', handleAlertRejected);
         socket.on('intel_findings', handleIntelFindings);
+        socket.on('intel_findings_updated', handleIntelFindingsUpdated);
 
         return () => {
             socket.off('new_alert_for_review', handleNewAlert);
             socket.off('alert_approved', handleAlertApproved);
             socket.off('alert_rejected', handleAlertRejected);
             socket.off('intel_findings', handleIntelFindings);
+            socket.off('intel_findings_updated', handleIntelFindingsUpdated);
         };
     }, [socket, selectedAlert]);
 
@@ -234,9 +266,22 @@ function AnalystDashboard() {
                 <div className="mt-4">
                     <IntelFindingsPanel
                         findings={intelFindings}
+                        latestFindings={latestIntelFindings}
                         recommendations={intelRecommendations}
                         region={selectedRegion}
-                        onAlertCreated={() => {}}
+                        onAlertCreated={(result) => {
+                            const findingId = result?.finding_id ? String(result.finding_id) : null;
+                            if (!findingId) {
+                                return;
+                            }
+
+                            setIntelFindings((prev) => prev.filter((finding) => getFindingKey(finding) !== findingId));
+                            setLatestIntelFindings((prev) => prev.filter((finding) => getFindingKey(finding) !== findingId));
+                            setIntelRecommendations((prev) => prev.filter((recommendation) => {
+                                const primaryFinding = recommendation.primary_finding || recommendation;
+                                return getFindingKey(primaryFinding) !== findingId;
+                            }));
+                        }}
                     />
                 </div>
             </section>

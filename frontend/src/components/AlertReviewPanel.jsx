@@ -1,5 +1,14 @@
 import { useState, useEffect } from 'react';
-import { approveAlert, getSourceConfig, rejectAlert, verifyAlert } from '../services/api';
+import {
+    approveAlert,
+    deleteMedia as deleteMediaRequest,
+    getAlertMedia,
+    getSourceConfig,
+    rejectAlert,
+    resolveMediaUrl,
+    uploadAlertMedia,
+    verifyAlert
+} from '../services/api';
 import AlertMap from './AlertMap';
 import SourceSelector from './SourceSelector';
 import SystemIcon from './SystemIcon';
@@ -139,6 +148,19 @@ function getAlertCategoryLabel(alert) {
     return alert?.event_type?.replace(/_/g, ' ') || 'Alert';
 }
 
+function formatOriginLabel(origin) {
+    switch (origin) {
+        case 'analyst_upload':
+            return 'Analyst Upload';
+        case 'twitter':
+            return 'Twitter';
+        case 'news':
+            return 'News';
+        default:
+            return origin || 'Media';
+    }
+}
+
 function escapeRegExp(value) {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -187,6 +209,11 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
     const [approving, setApproving] = useState(false);
     const [verifying, setVerifying] = useState(false);
     const [verificationStep, setVerificationStep] = useState('');
+    const [alertMedia, setAlertMedia] = useState([]);
+    const [mediaLoading, setMediaLoading] = useState(false);
+    const [mediaUploading, setMediaUploading] = useState(false);
+    const [removingMediaId, setRemovingMediaId] = useState(null);
+    const [mediaError, setMediaError] = useState(null);
     const [selectedOption, setSelectedOption] = useState('concise');
     const [customMessage, setCustomMessage] = useState('');
     const [analystNotes, setAnalystNotes] = useState('');
@@ -223,12 +250,32 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
         };
     }, []);
 
+    const loadAlertMedia = async (alertId = selectedAlert?.id) => {
+        if (!alertId) {
+            setAlertMedia([]);
+            return;
+        }
+
+        setMediaLoading(true);
+        try {
+            const response = await getAlertMedia(alertId);
+            setAlertMedia(response.data?.media || []);
+            setMediaError(null);
+        } catch (err) {
+            setMediaError(err.response?.data?.error || err.message);
+            setAlertMedia([]);
+        } finally {
+            setMediaLoading(false);
+        }
+    };
+
     useEffect(() => {
         setApprovalStatus(null);
         setCustomMessage('');
         setAnalystNotes('');
         setVerifying(false);
         setVerificationStep('');
+        setMediaError(null);
 
         if (verificationProviders.length > 0) {
             setSelectedVerificationSourceIds(
@@ -242,6 +289,12 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
             setCustomMessage(selectedAlert.custom_message || '');
         } else if (selectedAlert?.selected_message_option) {
             setSelectedOption(selectedAlert.selected_message_option);
+        }
+
+        if (selectedAlert?.id) {
+            loadAlertMedia(selectedAlert.id);
+        } else {
+            setAlertMedia([]);
         }
     }, [selectedAlert?.id, verificationProviders]);
 
@@ -261,6 +314,7 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
 
             setVerifying(false);
             setVerificationStep('');
+            loadAlertMedia(selectedAlert.id);
 
             if (!onAlertUpdated) {
                 return;
@@ -313,6 +367,36 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
             console.error('Verification failed:', err);
             setVerifying(false);
             setVerificationStep('Verification failed');
+        }
+    };
+
+    const handleUploadMedia = async (files) => {
+        if (!selectedAlert || !files?.length) {
+            return;
+        }
+
+        setMediaUploading(true);
+        try {
+            const response = await uploadAlertMedia(selectedAlert.id, files);
+            setAlertMedia(response.data?.media || []);
+            setMediaError(null);
+        } catch (err) {
+            setMediaError(err.response?.data?.error || err.message);
+        } finally {
+            setMediaUploading(false);
+        }
+    };
+
+    const handleDeleteMedia = async (mediaId) => {
+        setRemovingMediaId(mediaId);
+        try {
+            await deleteMediaRequest(mediaId);
+            await loadAlertMedia(selectedAlert?.id);
+            setMediaError(null);
+        } catch (err) {
+            setMediaError(err.response?.data?.error || err.message);
+        } finally {
+            setRemovingMediaId(null);
         }
     };
 
@@ -380,7 +464,7 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
     const verificationSourceSelection = verificationData?.source_selection;
     const verificationState = selectedAlert.verification_status || 'UNVERIFIED';
     const verificationInFlight = verifying || verificationState === 'VERIFYING';
-    const canStartVerification = !verificationInFlight && (!selectedAlert.verification_status || selectedAlert.verification_status === 'UNVERIFIED');
+    const canStartVerification = !verificationInFlight;
     const totalRecipients = (selectedAlert.affected_users_count?.critical || 0)
         + (selectedAlert.affected_users_count?.warning || 0)
         + (selectedAlert.affected_users_count?.watch || 0);
@@ -405,6 +489,7 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
     const newsSources = verificationData?.news_summary?.sources || [];
     const webSources = verificationData?.web_search?.sources || [];
     const modelSources = verificationData?.perplexity?.key_sources || [];
+    const mediaSummary = verificationData?.media_analysis?.summary || {};
     const primaryLabel = getAlertPrimaryLabel(selectedAlert);
     const categoryLabel = getAlertCategoryLabel(selectedAlert);
 
@@ -496,7 +581,7 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
                         disabled={verifying}
                         className="command-button mt-5"
                     >
-                        <span>Start Deep Forensic Investigation</span>
+                        <span>{verificationState === 'UNVERIFIED' ? 'Start Deep Forensic Investigation' : 'Re-run Verification'}</span>
                     </button>
                 )}
 
@@ -510,6 +595,109 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
                         </div>
                     </div>
                 )}
+
+                <div className="mt-6 rounded-2xl border border-slate-800 bg-slate-950/45 p-4">
+                    <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                        <div>
+                            <div className="section-title">Media Evidence</div>
+                            <div className="mt-2 text-sm font-semibold text-slate-100">
+                                {mediaSummary.total_analyzed || 0} analyzed • {mediaSummary.relevant_images || 0} relevant • {mediaSummary.high_value_evidence || 0} high-value
+                            </div>
+                            <div className="mt-2 text-xs text-slate-500">
+                                Attach images, remove weak evidence, then re-run verification to refresh the media analysis.
+                            </div>
+                        </div>
+
+                        <label className="secondary-button cursor-pointer self-start">
+                            <SystemIcon name="upload" className="h-4 w-4" />
+                            <span>{mediaUploading ? 'Uploading...' : 'Attach Images'}</span>
+                            <input
+                                type="file"
+                                accept="image/jpeg,image/png,image/webp"
+                                multiple
+                                className="hidden"
+                                onChange={(event) => {
+                                    handleUploadMedia(event.target.files);
+                                    event.target.value = '';
+                                }}
+                            />
+                        </label>
+                    </div>
+
+                    {mediaError && (
+                        <div className="mt-4 rounded-xl border border-red-400/25 bg-red-400/10 px-4 py-3 text-sm text-red-100">
+                            {mediaError}
+                        </div>
+                    )}
+
+                    {mediaLoading ? (
+                        <div className="mt-4 text-sm text-slate-400">Loading media evidence...</div>
+                    ) : alertMedia.length === 0 ? (
+                        <div className="mt-4 rounded-2xl border border-slate-800 bg-slate-950/60 p-4 text-sm text-slate-500">
+                            No images attached to this alert yet.
+                        </div>
+                    ) : (
+                        <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                            {alertMedia.map((media) => (
+                                <div key={media.id} className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-950/70">
+                                    <div className="aspect-[4/3] overflow-hidden bg-slate-950/80">
+                                        <img
+                                            src={resolveMediaUrl(media.preview_url || media.source_url)}
+                                            alt={media.analysis_summary?.description || formatOriginLabel(media.origin)}
+                                            className="h-full w-full object-cover"
+                                        />
+                                    </div>
+
+                                    <div className="space-y-3 p-4">
+                                        <div className="flex flex-wrap gap-2">
+                                            <span className="rounded-full border border-cyan-300/20 bg-cyan-300/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-cyan-100">
+                                                {formatOriginLabel(media.origin)}
+                                            </span>
+                                            <span className="rounded-full border border-slate-700 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-300">
+                                                {media.analysis_status || 'PENDING'}
+                                            </span>
+                                        </div>
+
+                                        <div className="text-sm font-semibold text-slate-100">
+                                            {media.analysis_summary?.description || 'Pending media analysis'}
+                                        </div>
+
+                                        <div className="flex flex-wrap gap-2 text-[11px] text-slate-400">
+                                            {media.analysis_summary?.evidence_type && <span>Type: {media.analysis_summary.evidence_type}</span>}
+                                            {media.analysis_summary?.verification_value && <span>Value: {media.analysis_summary.verification_value}</span>}
+                                            {typeof media.analysis_summary?.is_relevant === 'boolean' && (
+                                                <span>{media.analysis_summary.is_relevant ? 'Relevant' : 'Not relevant'}</span>
+                                            )}
+                                        </div>
+
+                                        <div className="flex items-center justify-between gap-3">
+                                            {media.source_url ? (
+                                                <a
+                                                    href={media.source_url}
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                    className="text-xs text-cyan-200 hover:text-cyan-100"
+                                                >
+                                                    View source
+                                                </a>
+                                            ) : <span className="text-xs text-slate-500">Temporary upload</span>}
+
+                                            <button
+                                                type="button"
+                                                onClick={() => handleDeleteMedia(media.id)}
+                                                disabled={removingMediaId === media.id}
+                                                className="secondary-button px-3 py-2 text-xs"
+                                            >
+                                                <SystemIcon name="x" className="h-4 w-4" />
+                                                <span>{removingMediaId === media.id ? 'Removing...' : 'Remove'}</span>
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
 
                 {(verificationData || verificationScore != null || verificationState === 'VERIFIED' || verificationState === 'DISPUTED') && (
                     <div className="mt-6 grid gap-6 xl:grid-cols-[300px,minmax(0,1fr)]">

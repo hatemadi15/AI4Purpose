@@ -3,6 +3,11 @@ const axios = require('axios');
 const Alert = require('../models/Alert');
 const { generatePostVerificationTemplates } = require('./geminiService');
 const { resolveSourceSelection } = require('../config/sourceCatalog');
+const {
+    analyzeAlertMedia,
+    extractImageCandidates,
+    syncAlertRemoteMedia
+} = require('./mediaService');
 require('dotenv').config();
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
@@ -238,6 +243,12 @@ function parseArticleTime(article) {
     if (!ts) return null;
     const time = new Date(ts).getTime();
     return Number.isNaN(time) ? null : time;
+}
+
+function collectNewsImageUrls(newsData = []) {
+    return newsData
+        .flatMap((article) => extractImageCandidates(article))
+        .filter(Boolean);
 }
 
 function createEmptyTwitterSearchResult() {
@@ -788,8 +799,7 @@ async function runVerificationSources({
         searchNews,
         checkWeatherVerification,
         checkSeismicVerification,
-        perplexitySearch,
-        analyzeMedia
+        perplexitySearch
     }
 }) {
     const enabledSources = new Set(sourceSelection.resolved);
@@ -802,11 +812,6 @@ async function runVerificationSources({
     if (enabledSources.has('twitter_search')) {
         if (io) io.emit('verification_progress', { alertId, step: 'Searching Twitter for eyewitness reports...' });
         twitterData = await deps.searchTwitter(eventDetails, searchKeywords);
-
-        if (twitterData.image_urls && twitterData.image_urls.length > 0) {
-            if (io) io.emit('verification_progress', { alertId, step: `Analyzing ${twitterData.image_urls.length} media images...` });
-            mediaAnalysis = await deps.analyzeMedia(twitterData.image_urls, eventDetails);
-        }
     }
 
     if (enabledSources.has('newsapi_ai')) {
@@ -885,7 +890,7 @@ function calculateVerificationOutcome({
     const baseScore = Math.max(semanticScore, sourceBonus);
     const scientificBonus = (weatherConfirmed ? 15 : 0) + (seismicConfirmed ? 20 : 0);
     const perplexityBonus = perplexityCorroborating > 0 ? Math.min(perplexityCorroborating * 5, 15) : 0;
-    const mediaBonus = enabledSources.has('twitter_search') && mediaAnalysis.summary?.high_value_evidence > 0
+    const mediaBonus = mediaAnalysis.summary?.high_value_evidence > 0
         ? Math.min(mediaAnalysis.summary.high_value_evidence * 10, 20)
         : 0;
     const finalScore = Math.min(100, baseScore + scientificBonus + perplexityBonus + mediaBonus);
@@ -910,89 +915,6 @@ function calculateVerificationOutcome({
         finalScore,
         finalStatus
     };
-}
-
-// --- C2. Media Analysis using Gemini Vision ---
-async function analyzeMedia(imageUrls, eventDetails) {
-    if (!imageUrls || imageUrls.length === 0) {
-        console.log('[Media] No images to analyze');
-        return { analyzed: false, images: [] };
-    }
-
-    console.log(`[Media] Analyzing ${imageUrls.length} images...`);
-
-    try {
-        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
-        const results = [];
-
-        // Analyze up to 3 images
-        for (const url of imageUrls.slice(0, 3)) {
-            try {
-                // Fetch image and convert to base64
-                const imageResponse = await axios.get(url, {
-                    responseType: 'arraybuffer',
-                    timeout: 10000
-                });
-                const base64Image = Buffer.from(imageResponse.data).toString('base64');
-                const mimeType = imageResponse.headers['content-type'] || 'image/jpeg';
-
-                const prompt = `Analyze this image in the context of verifying a crisis event.
-
-Event being verified:
-- Type: ${eventDetails.type}
-- Location: ${eventDetails.region}
-- Description: ${eventDetails.description?.slice(0, 200) || 'N/A'}
-
-Analyze and return JSON:
-{
-    "is_relevant": true/false (does image relate to the described event?),
-    "content_description": "Brief description of what's shown",
-    "evidence_type": "damage|smoke|fire|crowd|emergency_vehicles|military|aftermath|unrelated",
-    "credibility_indicators": {
-        "appears_authentic": true/false,
-        "signs_of_manipulation": [],
-        "contextual_match": true/false (matches claimed event type/location?)
-    },
-    "verification_value": "high|medium|low|none"
-}`;
-
-                const result = await model.generateContent({
-                    contents: [{
-                        role: 'user',
-                        parts: [
-                            { inlineData: { mimeType, data: base64Image } },
-                            { text: prompt }
-                        ]
-                    }],
-                    generationConfig: { responseMimeType: 'application/json' }
-                });
-
-                const analysis = JSON.parse(result.response.text());
-                results.push({
-                    url,
-                    ...analysis
-                });
-
-                console.log(`[Media] Analyzed: ${analysis.evidence_type} - ${analysis.verification_value} value`);
-            } catch (imgError) {
-                console.error(`[Media] Failed to analyze image: ${imgError.message}`);
-                results.push({ url, error: imgError.message });
-            }
-        }
-
-        return {
-            analyzed: true,
-            images: results,
-            summary: {
-                total_analyzed: results.filter(r => !r.error).length,
-                relevant_images: results.filter(r => r.is_relevant).length,
-                high_value_evidence: results.filter(r => r.verification_value === 'high').length
-            }
-        };
-    } catch (error) {
-        console.error('[Media] Analysis failed:', error.message);
-        return { analyzed: false, error: error.message, images: [] };
-    }
 }
 
 // --- D. Perplexity Independent Web Search ---
@@ -1087,6 +1009,13 @@ async function geminiAnalyze(allData, eventDetails) {
     try {
         console.log('[Gemini] Synthesizing all sources...');
         const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const relevantMediaLines = (allData.media?.images || [])
+            .filter((image) => image.analysis_summary?.is_relevant || image.is_relevant)
+            .map((image) => {
+                const summary = image.analysis_summary || image;
+                return `- ${summary.evidence_type}: ${summary.description || image.description || image.content_description} (${summary.verification_value} value)`;
+            })
+            .join('\n');
 
         const prompt = `You are a crisis forensics AI. Analyze ALL the following data to verify if this event is REAL.
 
@@ -1103,7 +1032,7 @@ ${allData.news.map((n, i) => `[News ${i + 1}]: "${n.title}" - ${n.source} (Time:
 
 MEDIA ANALYSIS (${allData.media?.summary?.total_analyzed || 0} images analyzed):
 ${allData.media?.analyzed ? JSON.stringify(allData.media.summary) : 'No images available'}
-${allData.media?.images?.filter(i => i.is_relevant).map(i => `- ${i.evidence_type}: ${i.content_description} (${i.verification_value} value)`).join('\n') || ''}
+${relevantMediaLines || ''}
 
 SCIENTIFIC DATA:
 Weather: ${JSON.stringify(allData.scientific.weather)}
@@ -1190,7 +1119,6 @@ async function performDeepVerification(alertId, io, requestedSourceIds) {
 
     const {
         twitterData,
-        mediaAnalysis,
         newsData,
         scientificData,
         perplexityData
@@ -1201,6 +1129,27 @@ async function performDeepVerification(alertId, io, requestedSourceIds) {
         searchKeywords,
         sourceSelection
     });
+
+    if (io) io.emit('verification_progress', { alertId, step: 'Linking media evidence...' });
+    await syncAlertRemoteMedia({
+        alertId: alert.id,
+        twitterImageUrls: twitterData.image_urls || [],
+        newsImageUrls: collectNewsImageUrls(newsData)
+    });
+
+    let mediaAnalysis = {
+        analyzed: false,
+        images: [],
+        summary: {
+            total_analyzed: 0,
+            relevant_images: 0,
+            high_value_evidence: 0,
+            by_origin: {}
+        }
+    };
+
+    if (io) io.emit('verification_progress', { alertId, step: 'Analyzing linked media evidence...' });
+    mediaAnalysis = await analyzeAlertMedia(alert.id, eventDetails);
 
     // Step 2: Gemini Synthesis
     if (io) io.emit('verification_progress', { alertId, step: 'Gemini analyzing all sources...' });
@@ -1273,12 +1222,16 @@ async function performDeepVerification(alertId, io, requestedSourceIds) {
         media_analysis: {
             analyzed: mediaAnalysis.analyzed,
             summary: mediaAnalysis.summary || {},
-            images: (mediaAnalysis.images || []).slice(0, 5).map(img => ({
-                url: img.url,
-                evidence_type: img.evidence_type,
-                is_relevant: img.is_relevant,
-                verification_value: img.verification_value,
-                description: img.content_description
+            images: (mediaAnalysis.images || []).slice(0, 5).map((img) => ({
+                id: img.id,
+                origin: img.origin,
+                url: img.preview_url || img.source_url,
+                source_url: img.source_url,
+                evidence_type: img.analysis_summary?.evidence_type,
+                is_relevant: img.analysis_summary?.is_relevant,
+                verification_value: img.analysis_summary?.verification_value,
+                description: img.analysis_summary?.description,
+                analysis_status: img.analysis_status
             }))
         },
         // Web Search: include Perplexity source URLs
