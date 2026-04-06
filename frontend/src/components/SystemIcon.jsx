@@ -48,6 +48,14 @@ function iconMarkup(name) {
                     <path d="M5 12h14" />
                 </>
             );
+        case 'upload':
+            return (
+                <>
+                    <path d="M12 16V6" />
+                    <path d="m8 10 4-4 4 4" />
+                    <path d="M5 18v1a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-1" />
+                </>
+            );
         case 'bell':
             return (
                 <>

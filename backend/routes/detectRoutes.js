@@ -9,6 +9,21 @@ const { NEWS_SCRAPER_REGISTRY, scrapeAllNews } = require('../services/newsScrape
 const { getSourceConfig, resolveSourceSelection } = require('../config/sourceCatalog');
 const Alert = require('../models/Alert');
 const IntelFinding = require('../models/IntelFinding');
+const {
+    attachUploadedMediaToFinding,
+    collectUploadedFiles,
+    copyFindingMediaToAlert,
+    createImageUploadMiddleware,
+    createRemoteMediaEvidence,
+    extractImageCandidates,
+    getMediaCountsForFindings,
+    linkFindingImageSources,
+    listFindingMedia,
+    parseMaybeJson,
+    serializeMediaEvidence
+} = require('../services/mediaService');
+
+const uploadImages = createImageUploadMiddleware();
 
 // Default region coordinates
 const REGION_COORDS = {
@@ -18,58 +33,135 @@ const REGION_COORDS = {
     Palestine: { lat: 31.9522, lon: 35.2332 }
 };
 
+const SEVERITY_PRIORITY = {
+    CRITICAL: 5,
+    HIGH: 4,
+    MEDIUM: 3,
+    LOW: 2,
+    UNCONFIRMED: 1
+};
+
+function getFindingTimestamp(finding) {
+    const candidate = finding?.posted_at || finding?.updated_at || finding?.created_at;
+    const timestamp = candidate ? new Date(candidate).getTime() : 0;
+    return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function sortFindingsForHistory(findings) {
+    return [...findings].sort((left, right) => {
+        const severityDelta = (SEVERITY_PRIORITY[right.severity] || 0) - (SEVERITY_PRIORITY[left.severity] || 0);
+        if (severityDelta !== 0) {
+            return severityDelta;
+        }
+
+        return getFindingTimestamp(right) - getFindingTimestamp(left);
+    });
+}
+
 // Helper function to save findings to database
 async function saveFindings(findings, region) {
-    const saved = [];
+    const processed = [];
+    let newCount = 0;
+
     for (const finding of findings) {
         try {
             const findingId = finding.id || `${finding.source_type}-${Date.now()}-${Math.random().toString(36).substring(7)}`;
+            const defaults = {
+                finding_id: findingId,
+                type: finding.type || 'NEWS',
+                source: finding.source,
+                source_type: finding.source_type,
+                source_handle: finding.source_handle,
+                title: finding.title,
+                text: finding.text || finding.description,
+                description: finding.description,
+                url: finding.url,
+                language: finding.language,
+                region: region,
+                severity: finding.severity || 'UNCONFIRMED',
+                posted_at: finding.posted_at ? new Date(finding.posted_at) : null,
+                fetched_at: new Date(),
+                location: finding.location,
+                metrics: finding.metrics,
+                raw_data: finding.raw
+            };
 
             const [record, created] = await IntelFinding.findOrCreate({
                 where: { finding_id: findingId },
-                defaults: {
-                    finding_id: findingId,
-                    type: finding.type || 'NEWS',
-                    source: finding.source,
-                    source_type: finding.source_type,
-                    source_handle: finding.source_handle,
-                    title: finding.title,
-                    text: finding.text || finding.description,
-                    description: finding.description,
-                    url: finding.url,
-                    language: finding.language,
-                    region: region,
-                    severity: finding.severity || 'UNCONFIRMED',
-                    posted_at: finding.posted_at ? new Date(finding.posted_at) : null,
-                    fetched_at: new Date(),
-                    location: finding.location,
-                    metrics: finding.metrics,
-                    raw_data: finding.raw
-                }
+                defaults
             });
 
-            if (created) {
-                saved.push(record);
+            if (!created) {
+                await record.update({
+                    ...defaults,
+                    alert_created: record.alert_created
+                });
             }
+
+            await linkFindingImageSources(record, finding);
+
+            if (created) {
+                newCount += 1;
+            }
+
+            processed.push({ findingId, record, created });
         } catch (err) {
             console.error('Failed to save finding:', err.message);
         }
     }
-    return saved;
+    return {
+        newCount,
+        processed
+    };
+}
+
+async function findIntelFindingByRouteId(routeId) {
+    if (!routeId) {
+        return null;
+    }
+
+    if (/^\d+$/.test(String(routeId))) {
+        const byPrimaryKey = await IntelFinding.findByPk(routeId);
+        if (byPrimaryKey) {
+            return byPrimaryKey;
+        }
+    }
+
+    return IntelFinding.findOne({
+        where: { finding_id: String(routeId) }
+    });
+}
+
+async function getStoredFindings({ region, limit = 100, includeAlertCreated = false }) {
+    const where = {};
+    if (region) {
+        where.region = region;
+    }
+    if (!includeAlertCreated) {
+        where.alert_created = false;
+    }
+
+    const findings = await IntelFinding.findAll({
+        where,
+        order: [['posted_at', 'DESC'], ['updated_at', 'DESC']],
+        limit
+    });
+    const mediaCounts = await getMediaCountsForFindings(findings.map((finding) => finding.id));
+
+    return sortFindingsForHistory(findings.map((finding) => ({
+        ...finding.toJSON(),
+        media_count: mediaCounts[finding.id] || 0
+    })));
 }
 
 // GET /api/detect/findings - Get saved intel findings
 router.get('/detect/findings', async (req, res) => {
     try {
-        const { region, limit = 100 } = req.query;
-
-        const where = {};
-        if (region) where.region = region;
-
-        const findings = await IntelFinding.findAll({
-            where,
-            order: [['posted_at', 'DESC']],
-            limit: parseInt(limit)
+        const { region, limit = 100, include_alert_created } = req.query;
+        const findings = await getStoredFindings({
+            region,
+            limit: parseInt(limit, 10),
+            includeAlertCreated: include_alert_created === 'true'
         });
 
         res.json({
@@ -80,6 +172,51 @@ router.get('/detect/findings', async (req, res) => {
     } catch (error) {
         console.error('Get findings error:', error);
         res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+router.get('/detect/findings/:id/media', async (req, res) => {
+    try {
+        const finding = await findIntelFindingByRouteId(req.params.id);
+        if (!finding) {
+            return res.status(404).json({ success: false, error: 'Finding not found' });
+        }
+
+        const media = await listFindingMedia(finding.id);
+        res.json({
+            success: true,
+            finding_id: finding.finding_id,
+            media: media.map(serializeMediaEvidence)
+        });
+    } catch (error) {
+        console.error('Get finding media error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+router.post('/detect/findings/:id/media', uploadImages, async (req, res) => {
+    try {
+        const finding = await findIntelFindingByRouteId(req.params.id);
+        if (!finding) {
+            return res.status(404).json({ success: false, error: 'Finding not found' });
+        }
+
+        const files = collectUploadedFiles(req);
+        if (files.length === 0) {
+            return res.status(400).json({ success: false, error: 'At least one image is required' });
+        }
+
+        const created = await attachUploadedMediaToFinding(finding.id, files);
+        const media = await listFindingMedia(finding.id);
+
+        res.json({
+            success: true,
+            created: created.map(serializeMediaEvidence),
+            media: media.map(serializeMediaEvidence)
+        });
+    } catch (error) {
+        console.error('Upload finding media error:', error);
+        res.status(400).json({ success: false, error: error.message });
     }
 });
 
@@ -97,13 +234,12 @@ router.get('/source-config', async (req, res) => {
 
 // POST /api/detect - Gather intel and return ALL findings for analyst review
 router.post('/detect', async (req, res) => {
-    const { region = 'Lebanon', source_ids } = req.body || {};
+    const { region = 'Lebanon', source_ids, source_options } = req.body || {};
     const io = req.app.get('io');
-    const sourceSelection = resolveSourceSelection('detection', source_ids);
+    const sourceSelection = resolveSourceSelection('detection', source_ids, source_options);
 
     try {
-        await IntelFinding.destroy({ where: { region } });
-        io.emit('detection_status', { step: 0, message: 'Clearing previous data for fresh run...', progress: 5 });
+        io.emit('detection_status', { step: 0, message: 'Loading persisted findings history...', progress: 5 });
 
         io.emit('detection_status', {
             step: 1,
@@ -117,8 +253,8 @@ router.post('/detect', async (req, res) => {
         const shouldRunMinistry = sourceSelection.resolved.includes('ministry_info');
 
         const [detectionData, twitterIntel, ministryIntel, scrapedNews] = await Promise.all([
-            detectCrisis(region, detectionSourceIds),
-            shouldRunIntelTwitter ? fetchIntelTwitter(region) : Promise.resolve(null),
+            detectCrisis(region, detectionSourceIds, sourceSelection.resolved_source_options),
+            shouldRunIntelTwitter ? fetchIntelTwitter(region, sourceSelection.resolved_source_options?.intel_twitter || {}) : Promise.resolve(null),
             shouldRunMinistry ? fetchMinistryAlerts(region) : Promise.resolve(null),
             scraperSourceIds.length > 0 ? scrapeAllNews(region, scraperSourceIds) : Promise.resolve(null)
         ]);
@@ -140,16 +276,32 @@ router.post('/detect', async (req, res) => {
         // Step 3: Save findings to database
         io.emit('detection_status', { step: 3, message: 'Saving findings to database...', progress: 60 });
         const savedFindings = await saveFindings(aggregatedIntel.findings, region);
-        console.log(`Saved ${savedFindings.length} new findings to database`);
+        console.log(`Saved ${savedFindings.newCount} new findings to database`);
+
+        const processedMap = new Map(savedFindings.processed.map((entry) => [entry.findingId, entry.record]));
+        const latestVisibleFindings = aggregatedIntel.findings
+            .filter((finding) => {
+                const findingId = finding.id || null;
+                const persistedRecord = findingId ? processedMap.get(findingId) : null;
+                return !persistedRecord?.alert_created;
+            })
+            .map((finding) => ({
+                ...finding,
+                media_count: extractImageCandidates(finding).length
+            }));
+        const visibleHistory = await getStoredFindings({
+            region,
+            limit: 200
+        });
 
         // Step 4: Generate recommendations
         io.emit('detection_status', { step: 4, message: 'Generating recommendations...', progress: 80 });
-        const recommendations = generateRecommendations(aggregatedIntel.findings, region);
+        const recommendations = generateRecommendations(latestVisibleFindings, region);
 
         // Step 5: Complete - emit findings for dashboard display
         io.emit('detection_status', {
             step: 5,
-            message: `Found ${aggregatedIntel.total_findings} intel items (${savedFindings.length} new)`,
+            message: `Found ${latestVisibleFindings.length} visible intel items (${savedFindings.newCount} new persisted)`,
             progress: 100,
             complete: true
         });
@@ -158,7 +310,8 @@ router.post('/detect', async (req, res) => {
         io.emit('intel_findings', {
             region,
             timestamp: new Date().toISOString(),
-            findings: aggregatedIntel.findings,
+            findings: visibleHistory,
+            latest_findings: latestVisibleFindings,
             summary: aggregatedIntel.summary,
             recommendations,
             sources: aggregatedIntel.sources,
@@ -167,9 +320,10 @@ router.post('/detect', async (req, res) => {
 
         res.json({
             success: true,
-            message: `Found ${aggregatedIntel.total_findings} intelligence items`,
+            message: `Found ${latestVisibleFindings.length} visible intelligence items`,
             region,
-            findings: aggregatedIntel.findings,
+            findings: visibleHistory,
+            latest_findings: latestVisibleFindings,
             recommendations,
             summary: aggregatedIntel.summary,
             source_selection: sourceSelection
@@ -185,7 +339,7 @@ router.post('/detect', async (req, res) => {
 // POST /api/detect/create-alert - Create alert from a specific finding
 router.post('/detect/create-alert', async (req, res) => {
     const {
-        finding,           // The intel finding to create alert from
+        finding: findingInput,           // The intel finding to create alert from
         region = 'Lebanon',
         severity = 'MEDIUM',
         affected_radius_km = 30
@@ -193,9 +347,12 @@ router.post('/detect/create-alert', async (req, res) => {
     const io = req.app.get('io');
 
     try {
+        const finding = parseMaybeJson(findingInput, findingInput);
         if (!finding) {
             return res.status(400).json({ success: false, error: 'Finding is required' });
         }
+
+        const persistedFinding = await findIntelFindingByRouteId(finding.finding_id || finding.id);
 
         // Get coordinates
         const coords = finding.location || REGION_COORDS[region] || REGION_COORDS.Lebanon;
@@ -250,6 +407,30 @@ router.post('/detect/create-alert', async (req, res) => {
             all_intel_findings: { finding }
         });
 
+        if (persistedFinding) {
+            await copyFindingMediaToAlert(persistedFinding.id, alert.id);
+            await persistedFinding.update({ alert_created: true });
+
+            const updatedVisibleHistory = await getStoredFindings({
+                region,
+                limit: 200
+            });
+
+            io.emit('intel_findings_updated', {
+                region,
+                findings: updatedVisibleHistory,
+                removed_finding_id: persistedFinding.finding_id
+            });
+        } else {
+            for (const imageUrl of extractImageCandidates(finding)) {
+                await createRemoteMediaEvidence({
+                    alertId: alert.id,
+                    origin: 'news',
+                    sourceUrl: imageUrl
+                });
+            }
+        }
+
         // Emit new alert
         io.emit('detection_status', { step: 5, message: 'Alert created', progress: 100, complete: true });
         io.emit('new_alert_for_review', {
@@ -260,6 +441,7 @@ router.post('/detect/create-alert', async (req, res) => {
         res.json({
             success: true,
             alertId: alert.id,
+            finding_id: persistedFinding?.finding_id || finding.finding_id || finding.id || null,
             message: 'Alert created from finding',
             summary: {
                 eventType: alert.event_type,

@@ -1,10 +1,32 @@
 import { useState, useEffect } from 'react';
-import { approveAlert, getSourceConfig, rejectAlert, verifyAlert } from '../services/api';
+import {
+    approveAlert,
+    deleteMedia as deleteMediaRequest,
+    getAlertMedia,
+    getSourceConfig,
+    rejectAlert,
+    resolveMediaUrl,
+    uploadAlertMedia,
+    verifyAlert
+} from '../services/api';
 import AlertMap from './AlertMap';
 import SourceSelector from './SourceSelector';
+import SourceOptionSelector from './SourceOptionSelector';
 import SystemIcon from './SystemIcon';
+import {
+    buildDefaultSourceOptionSelection,
+    getMergedSelectedSourceOptionIds,
+    getMergedSourceOptionGroups,
+    toggleSourceOptionSelection
+} from '../utils/sourceOptions';
+import { FALLBACK_SOURCE_CONFIG } from '../utils/fallbackSourceConfig';
 
 const MESSAGE_OPTIONS = ['concise', 'detailed', 'technical'];
+const SERIOUS_METADATA_WARNING_FLAGS = new Set([
+    'capture_time_conflict',
+    'gps_far_from_event',
+    'editing_software_tag'
+]);
 
 function SeverityBadge({ severity }) {
     const classes = {
@@ -97,6 +119,108 @@ function SourceRow({ href, title, meta, body, status }) {
     );
 }
 
+function getAgentStatusTone(status) {
+    if (status === 'used') {
+        return 'border-emerald-400/25 bg-emerald-400/10 text-emerald-100';
+    }
+    if (status === 'failed') {
+        return 'border-red-400/25 bg-red-400/10 text-red-100';
+    }
+    return 'border-slate-700 bg-slate-900/70 text-slate-300';
+}
+
+function formatContribution(value, suffix = '') {
+    if (value == null) return 'N/A';
+    if (typeof value === 'number') {
+        return `${value > 0 ? '+' : ''}${value}${suffix}`;
+    }
+    return `${value}${suffix}`;
+}
+
+function ScoreBreakdownCard({ scoreBreakdown, verificationScore }) {
+    if (!scoreBreakdown && verificationScore == null) {
+        return null;
+    }
+
+    const finalScore = scoreBreakdown?.final_score ?? verificationScore;
+    const threshold = scoreBreakdown?.threshold_for_verified ?? 50;
+
+    return (
+        <div className="rounded-2xl border border-slate-800 bg-slate-950/45 p-4">
+            <div className="section-title">Why This Score</div>
+            <div className="mt-3 flex items-end justify-between gap-3">
+                <div className="text-4xl font-semibold text-slate-50">{finalScore}%</div>
+                <div className="pb-1 text-[11px] uppercase tracking-[0.16em] text-slate-500">
+                    Verified at {threshold}+
+                </div>
+            </div>
+            {scoreBreakdown?.formula && (
+                <div className="mt-3 text-xs text-slate-500">{scoreBreakdown.formula}</div>
+            )}
+            {scoreBreakdown?.components?.length > 0 && (
+                <div className="mt-4 space-y-2">
+                    {scoreBreakdown.components.map((component) => (
+                        <div key={component.id} className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+                            <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0 flex-1">
+                                    <div className="text-xs font-semibold text-slate-100">{component.label}</div>
+                                    <div className="mt-1 text-[11px] text-slate-500">
+                                        Measured: {formatContribution(component.value)}
+                                    </div>
+                                </div>
+                                <div className="text-xs font-semibold text-cyan-200">
+                                    Applied: {formatContribution(component.applied_value)}
+                                </div>
+                            </div>
+                            <div className="mt-2 text-[11px] leading-5 text-slate-400">{component.detail}</div>
+                        </div>
+                    ))}
+                </div>
+            )}
+            {scoreBreakdown?.explanation?.length > 0 && (
+                <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/70 p-3 text-[11px] leading-5 text-slate-400">
+                    {scoreBreakdown.explanation.map((line, index) => (
+                        <div key={index}>{line}</div>
+                    ))}
+                </div>
+            )}
+        </div>
+    );
+}
+
+function VerificationAgentsCard({ agents }) {
+    if (!agents?.length) {
+        return null;
+    }
+
+    return (
+        <div className="rounded-2xl border border-slate-800 bg-slate-950/45 p-4">
+            <div className="section-title">Verification Agents</div>
+            <div className="mt-3 space-y-2">
+                {agents.map((agent) => (
+                    <div key={agent.id} className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+                        <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0 flex-1">
+                                <div className="text-xs font-semibold text-slate-100">{agent.label}</div>
+                                <div className="mt-1 text-[11px] text-slate-500">
+                                    {agent.service} | {agent.type === 'ai' ? 'AI agent' : 'System step'}
+                                </div>
+                            </div>
+                            <span className={`rounded-full border px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] ${getAgentStatusTone(agent.status)}`}>
+                                {(agent.status || 'used').replace(/_/g, ' ')}
+                            </span>
+                        </div>
+                        <div className="mt-2 text-[11px] leading-5 text-slate-400">{agent.role}</div>
+                        {agent.impact && (
+                            <div className="mt-2 text-[11px] leading-5 text-cyan-200">{agent.impact}</div>
+                        )}
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+}
+
 function formatTime(dateStr) {
     if (!dateStr) return 'N/A';
 
@@ -122,6 +246,278 @@ function formatCoordinates(lat, lon) {
     return `${parsedLat.toFixed(4)}, ${parsedLon.toFixed(4)}`;
 }
 
+function formatMetadataFlag(flag) {
+    const labels = {
+        social_copy_metadata_missing: 'Metadata stripped on social copy',
+        capture_time_missing: 'Capture time missing',
+        capture_time_conflict: 'Capture time conflict',
+        gps_missing: 'GPS missing',
+        gps_far_from_event: 'GPS far from event',
+        editing_software_tag: 'Editing software tag',
+        metadata_present_no_conflict: 'Metadata shows no obvious conflict'
+    };
+
+    return labels[flag] || flag.replace(/_/g, ' ');
+}
+
+function getMetadataStatus(metadataFlags = []) {
+    if (metadataFlags.some((flag) => SERIOUS_METADATA_WARNING_FLAGS.has(flag))) {
+        return {
+            label: 'Metadata warning',
+            tone: 'border-amber-400/25 bg-amber-400/10 text-amber-100'
+        };
+    }
+
+    if (metadataFlags.includes('metadata_present_no_conflict')) {
+        return {
+            label: 'No metadata conflict',
+            tone: 'border-emerald-400/25 bg-emerald-400/10 text-emerald-100'
+        };
+    }
+
+    if (metadataFlags.includes('social_copy_metadata_missing')) {
+        return {
+            label: 'Social copy metadata unavailable',
+            tone: 'border-slate-700 bg-slate-900/70 text-slate-300'
+        };
+    }
+
+    if (metadataFlags.length > 0) {
+        return {
+            label: 'Partial metadata',
+            tone: 'border-slate-700 bg-slate-900/70 text-slate-300'
+        };
+    }
+
+    return {
+        label: 'No metadata notes',
+        tone: 'border-slate-700 bg-slate-900/70 text-slate-300'
+    };
+}
+
+function getReverseSearchStatus(reverseImageSearch) {
+    if (!reverseImageSearch) {
+        return null;
+    }
+
+    if (reverseImageSearch.likely_old) {
+        return {
+            label: 'Possible older image',
+            tone: 'border-red-400/25 bg-red-400/10 text-red-100'
+        };
+    }
+
+    if (reverseImageSearch.status === 'searched') {
+        return {
+            label: 'No older match found',
+            tone: 'border-emerald-400/25 bg-emerald-400/10 text-emerald-100'
+        };
+    }
+
+    if (reverseImageSearch.status === 'unavailable') {
+        return {
+            label: 'Reverse search unavailable',
+            tone: 'border-slate-700 bg-slate-900/70 text-slate-300'
+        };
+    }
+
+    if (reverseImageSearch.status === 'error') {
+        return {
+            label: 'Reverse search failed',
+            tone: 'border-amber-400/25 bg-amber-400/10 text-amber-100'
+        };
+    }
+
+    return {
+        label: 'Reverse search skipped',
+        tone: 'border-slate-700 bg-slate-900/70 text-slate-300'
+    };
+}
+
+function MetadataLine({ label, value }) {
+    if (!value) {
+        return null;
+    }
+
+    return (
+        <div className="text-[11px] leading-5 text-slate-400">
+            <span className="text-slate-500">{label}:</span> {value}
+        </div>
+    );
+}
+
+export function MediaAnalysisCard({ mediaAnalysis }) {
+    const images = mediaAnalysis?.images || [];
+    const summary = mediaAnalysis?.summary || {};
+
+    if (!mediaAnalysis?.analyzed && images.length === 0) {
+        return null;
+    }
+
+    return (
+        <SourceListCard
+            icon="layers"
+            title="Media"
+            count={`${summary.total_analyzed || images.length || 0} analyzed | ${summary.high_value_evidence || 0} high-value`}
+            status="Click to expand"
+        >
+            <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3 text-xs leading-5 text-slate-400">
+                Metadata available on {summary.metadata_available_count || 0} image{summary.metadata_available_count === 1 ? '' : 's'}.
+                {' '}
+                Warnings found on {summary.metadata_warning_count || 0} image{summary.metadata_warning_count === 1 ? '' : 's'}.
+                {' '}
+                Reverse search ran on {summary.reverse_search_performed_count || 0} image{summary.reverse_search_performed_count === 1 ? '' : 's'} and flagged {summary.reverse_search_warning_count || 0} as possibly older.
+            </div>
+
+            {images.length === 0 && (
+                <div className="text-xs text-slate-500">No media images were analyzed.</div>
+            )}
+
+            {images.map((image, index) => {
+                const metadataStatus = getMetadataStatus(image.metadata_flags || []);
+                const reverseSearchStatus = getReverseSearchStatus(image.reverse_image_search);
+                const trustedBadge = image.context?.is_trusted ? 'Trusted source' : 'Source image';
+                const gpsValue = image.metadata?.gps
+                    ? `${formatCoordinates(image.metadata.gps.latitude, image.metadata.gps.longitude)}${image.metadata.gps.distance_km_to_event != null ? ` | ${image.metadata.gps.distance_km_to_event} km from event` : ''}`
+                    : null;
+                const deviceValue = [image.metadata?.device_make, image.metadata?.device_model].filter(Boolean).join(' ');
+                const dimensionsValue = image.metadata?.width && image.metadata?.height
+                    ? `${image.metadata.width} x ${image.metadata.height}`
+                    : null;
+
+                return (
+                    <div key={`${image.url || 'media'}-${index}`} className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+                        <div className="flex flex-col gap-3 lg:flex-row">
+                            {image.url && (
+                                <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-950/70 lg:w-40">
+                                    <img
+                                        src={image.url}
+                                        alt={image.description || `Media evidence ${index + 1}`}
+                                        className="h-32 w-full object-cover"
+                                        loading="lazy"
+                                    />
+                                </div>
+                            )}
+
+                            <div className="min-w-0 flex-1">
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <span className="rounded-full border border-cyan-300/25 bg-cyan-300/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-cyan-100">
+                                        {image.evidence_type || trustedBadge}
+                                    </span>
+                                    {image.verification_value && (
+                                        <span className="rounded-full border border-slate-700 bg-slate-900/70 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-300">
+                                            {image.verification_value} value
+                                        </span>
+                                    )}
+                                    <span className={`rounded-full border px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] ${metadataStatus.tone}`}>
+                                        {metadataStatus.label}
+                                    </span>
+                                    {reverseSearchStatus && (
+                                        <span className={`rounded-full border px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] ${reverseSearchStatus.tone}`}>
+                                            {reverseSearchStatus.label}
+                                        </span>
+                                    )}
+                                </div>
+
+                                {image.description && (
+                                    <div className="mt-3 text-xs leading-5 text-slate-300">{image.description}</div>
+                                )}
+
+                                {(image.context?.username || image.context?.tweet_created_at) && (
+                                    <div className="mt-3 text-[11px] text-slate-500">
+                                        {image.context?.username ? `@${image.context.username}` : 'Source image'}
+                                        {image.context?.tweet_created_at ? ` | Tweet time: ${formatTime(image.context.tweet_created_at)}` : ''}
+                                        {image.context?.is_trusted ? ' | Trusted account' : ''}
+                                    </div>
+                                )}
+
+                                <div className="mt-3 grid gap-2 md:grid-cols-2">
+                                    <MetadataLine label="Capture time" value={image.metadata?.capture_time ? formatTime(image.metadata.capture_time) : null} />
+                                    <MetadataLine label="GPS" value={gpsValue} />
+                                    <MetadataLine label="Device" value={deviceValue || null} />
+                                    <MetadataLine label="Software" value={image.metadata?.software || null} />
+                                    <MetadataLine label="Dimensions" value={dimensionsValue} />
+                                    <MetadataLine label="File" value={image.metadata?.mime_type || null} />
+                                </div>
+
+                                {image.metadata_flags?.length > 0 && (
+                                    <div className="mt-3 flex flex-wrap gap-2">
+                                        {image.metadata_flags.map((flag) => (
+                                            <span
+                                                key={flag}
+                                                className="rounded-full border border-slate-700 bg-slate-900/70 px-2 py-1 text-[10px] uppercase tracking-[0.16em] text-slate-300"
+                                            >
+                                                {formatMetadataFlag(flag)}
+                                            </span>
+                                        ))}
+                                    </div>
+                                )}
+
+                                {image.metadata_notes?.length > 0 && (
+                                    <div className="mt-3 space-y-1">
+                                        {image.metadata_notes.map((note, noteIndex) => (
+                                            <div key={noteIndex} className="text-[11px] leading-5 text-slate-400">
+                                                {note}
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+
+                                {image.reverse_image_search && (
+                                    <div className="mt-3 rounded-xl border border-slate-800 bg-slate-950/80 p-3">
+                                        <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500">
+                                            Reverse Search
+                                        </div>
+                                        {image.reverse_image_search.summary && (
+                                            <div className="mt-2 text-[11px] leading-5 text-slate-300">
+                                                {image.reverse_image_search.summary}
+                                            </div>
+                                        )}
+                                        {image.reverse_image_search.earliest_known_use && (
+                                            <div className="mt-2 text-[11px] leading-5 text-slate-400">
+                                                Earliest known use: {formatTime(image.reverse_image_search.earliest_known_use)}
+                                            </div>
+                                        )}
+                                        {image.reverse_image_search.notes?.length > 0 && (
+                                            <div className="mt-2 space-y-1">
+                                                {image.reverse_image_search.notes.map((note, noteIndex) => (
+                                                    <div key={noteIndex} className="text-[11px] leading-5 text-slate-400">
+                                                        {note}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                        {image.reverse_image_search.matches?.length > 0 && (
+                                            <div className="mt-3 space-y-2">
+                                                {image.reverse_image_search.matches.slice(0, 3).map((match, matchIndex) => (
+                                                    <SourceRow
+                                                        key={`${match.url || 'match'}-${matchIndex}`}
+                                                        href={match.url}
+                                                        title={match.title}
+                                                        meta={match.published_at ? `Published: ${formatTime(match.published_at)}` : 'Published date unavailable'}
+                                                        body={match.reason}
+                                                        status={image.reverse_image_search.likely_old ? 'Older use' : 'Match'}
+                                                    />
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+
+                                {image.error && (
+                                    <div className="mt-3 text-[11px] text-red-200">
+                                        Media analysis failed: {image.error}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                );
+            })}
+        </SourceListCard>
+    );
+}
+
 function getAlertPrimaryLabel(alert) {
     const finding = alert?.detection_data?.finding || alert?.all_intel_findings?.finding;
 
@@ -137,6 +533,19 @@ function getAlertPrimaryLabel(alert) {
 
 function getAlertCategoryLabel(alert) {
     return alert?.event_type?.replace(/_/g, ' ') || 'Alert';
+}
+
+function formatOriginLabel(origin) {
+    switch (origin) {
+        case 'analyst_upload':
+            return 'Analyst Upload';
+        case 'twitter':
+            return 'Twitter';
+        case 'news':
+            return 'News';
+        default:
+            return origin || 'Media';
+    }
 }
 
 function escapeRegExp(value) {
@@ -184,16 +593,23 @@ function getMessagePreview(message, alert, language = 'en') {
 }
 
 function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelection }) {
+    const fallbackProviders = FALLBACK_SOURCE_CONFIG.verification.providers;
     const [approving, setApproving] = useState(false);
     const [verifying, setVerifying] = useState(false);
     const [verificationStep, setVerificationStep] = useState('');
+    const [alertMedia, setAlertMedia] = useState([]);
+    const [mediaLoading, setMediaLoading] = useState(false);
+    const [mediaUploading, setMediaUploading] = useState(false);
+    const [removingMediaId, setRemovingMediaId] = useState(null);
+    const [mediaError, setMediaError] = useState(null);
     const [selectedOption, setSelectedOption] = useState('concise');
     const [customMessage, setCustomMessage] = useState('');
     const [analystNotes, setAnalystNotes] = useState('');
     const [approvalStatus, setApprovalStatus] = useState(null);
-    const [verificationProviders, setVerificationProviders] = useState([]);
-    const [selectedVerificationSourceIds, setSelectedVerificationSourceIds] = useState([]);
-    const [sourceConfigLoaded, setSourceConfigLoaded] = useState(false);
+    const [verificationProviders, setVerificationProviders] = useState(fallbackProviders);
+    const [selectedVerificationSourceIds, setSelectedVerificationSourceIds] = useState(fallbackProviders.filter((provider) => provider.default_enabled).map((provider) => provider.id));
+    const [selectedVerificationSourceOptions, setSelectedVerificationSourceOptions] = useState(buildDefaultSourceOptionSelection(fallbackProviders));
+    const [sourceConfigLoaded, setSourceConfigLoaded] = useState(true);
     const [sourceConfigError, setSourceConfigError] = useState(null);
 
     useEffect(() => {
@@ -207,11 +623,15 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
                 const providers = response.data?.verification?.providers || [];
                 setVerificationProviders(providers);
                 setSelectedVerificationSourceIds(providers.filter((provider) => provider.default_enabled).map((provider) => provider.id));
+                setSelectedVerificationSourceOptions(buildDefaultSourceOptionSelection(providers));
                 setSourceConfigLoaded(true);
                 setSourceConfigError(null);
             } catch (err) {
                 if (!active) return;
-                setSourceConfigLoaded(false);
+                setVerificationProviders(fallbackProviders);
+                setSelectedVerificationSourceIds(fallbackProviders.filter((provider) => provider.default_enabled).map((provider) => provider.id));
+                setSelectedVerificationSourceOptions(buildDefaultSourceOptionSelection(fallbackProviders));
+                setSourceConfigLoaded(true);
                 setSourceConfigError(err.response?.data?.error || err.message);
             }
         };
@@ -223,12 +643,32 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
         };
     }, []);
 
+    const loadAlertMedia = async (alertId = selectedAlert?.id) => {
+        if (!alertId) {
+            setAlertMedia([]);
+            return;
+        }
+
+        setMediaLoading(true);
+        try {
+            const response = await getAlertMedia(alertId);
+            setAlertMedia(response.data?.media || []);
+            setMediaError(null);
+        } catch (err) {
+            setMediaError(err.response?.data?.error || err.message);
+            setAlertMedia([]);
+        } finally {
+            setMediaLoading(false);
+        }
+    };
+
     useEffect(() => {
         setApprovalStatus(null);
         setCustomMessage('');
         setAnalystNotes('');
         setVerifying(false);
         setVerificationStep('');
+        setMediaError(null);
 
         if (verificationProviders.length > 0) {
             setSelectedVerificationSourceIds(
@@ -236,12 +676,19 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
                     .filter((provider) => provider.default_enabled)
                     .map((provider) => provider.id)
             );
+            setSelectedVerificationSourceOptions(buildDefaultSourceOptionSelection(verificationProviders));
         }
 
         if (selectedAlert?.selected_message_option === 'custom') {
             setCustomMessage(selectedAlert.custom_message || '');
         } else if (selectedAlert?.selected_message_option) {
             setSelectedOption(selectedAlert.selected_message_option);
+        }
+
+        if (selectedAlert?.id) {
+            loadAlertMedia(selectedAlert.id);
+        } else {
+            setAlertMedia([]);
         }
     }, [selectedAlert?.id, verificationProviders]);
 
@@ -261,6 +708,7 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
 
             setVerifying(false);
             setVerificationStep('');
+            loadAlertMedia(selectedAlert.id);
 
             if (!onAlertUpdated) {
                 return;
@@ -307,7 +755,8 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
         try {
             await verifyAlert(
                 selectedAlert.id,
-                sourceConfigLoaded ? selectedVerificationSourceIds : undefined
+                sourceConfigLoaded ? selectedVerificationSourceIds : undefined,
+                sourceConfigLoaded ? selectedVerificationSourceOptions : undefined
             );
         } catch (err) {
             console.error('Verification failed:', err);
@@ -316,11 +765,48 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
         }
     };
 
+    const handleUploadMedia = async (files) => {
+        if (!selectedAlert || !files?.length) {
+            return;
+        }
+
+        setMediaUploading(true);
+        try {
+            const response = await uploadAlertMedia(selectedAlert.id, files);
+            setAlertMedia(response.data?.media || []);
+            setMediaError(null);
+        } catch (err) {
+            setMediaError(err.response?.data?.error || err.message);
+        } finally {
+            setMediaUploading(false);
+        }
+    };
+
+    const handleDeleteMedia = async (mediaId) => {
+        setRemovingMediaId(mediaId);
+        try {
+            await deleteMediaRequest(mediaId);
+            await loadAlertMedia(selectedAlert?.id);
+            setMediaError(null);
+        } catch (err) {
+            setMediaError(err.response?.data?.error || err.message);
+        } finally {
+            setRemovingMediaId(null);
+        }
+    };
+
     const toggleVerificationSource = (sourceId) => {
         setSelectedVerificationSourceIds((current) => (
             current.includes(sourceId)
                 ? current.filter((id) => id !== sourceId)
                 : [...current, sourceId]
+        ));
+    };
+
+    const toggleVerificationSourceOption = (sourceIds, optionGroupId, optionId) => {
+        setSelectedVerificationSourceOptions((current) => sourceIds.reduce(
+            (nextSelection, sourceId) => toggleSourceOptionSelection(nextSelection, sourceId, optionGroupId, optionId),
+            current
         ));
     };
 
@@ -378,9 +864,12 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
     const sourcesConfirmed = selectedAlert.sources_confirmed ?? verificationData?.corroboration?.sources_corroborating ?? 0;
     const sourcesChecked = selectedAlert.sources_checked ?? verificationData?.corroboration?.total_sources_checked ?? 0;
     const verificationSourceSelection = verificationData?.source_selection;
+    const verificationAgents = verificationData?.verification_agents || [];
+    const scoreBreakdown = verificationData?.score_breakdown;
+    const searchKeywords = verificationData?.search_keywords;
     const verificationState = selectedAlert.verification_status || 'UNVERIFIED';
     const verificationInFlight = verifying || verificationState === 'VERIFYING';
-    const canStartVerification = !verificationInFlight && (!selectedAlert.verification_status || selectedAlert.verification_status === 'UNVERIFIED');
+    const canStartVerification = !verificationInFlight;
     const totalRecipients = (selectedAlert.affected_users_count?.critical || 0)
         + (selectedAlert.affected_users_count?.warning || 0)
         + (selectedAlert.affected_users_count?.watch || 0);
@@ -402,11 +891,15 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
 
     const socialSources = verificationData?.twitter_summary?.sources || [];
     const socialSamples = verificationData?.twitter_summary?.samples || [];
+    const socialAccountsSearched = verificationData?.twitter_summary?.trusted_accounts_searched || [];
     const newsSources = verificationData?.news_summary?.sources || [];
+    const mediaAnalysis = verificationData?.media_analysis;
     const webSources = verificationData?.web_search?.sources || [];
     const modelSources = verificationData?.perplexity?.key_sources || [];
+    const mediaSummary = verificationData?.media_analysis?.summary || {};
     const primaryLabel = getAlertPrimaryLabel(selectedAlert);
     const categoryLabel = getAlertCategoryLabel(selectedAlert);
+    const mergedVerificationOptionGroups = getMergedSourceOptionGroups(verificationProviders, selectedVerificationSourceIds);
 
     return (
         <div className="space-y-6">
@@ -482,6 +975,18 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
                         onToggle={toggleVerificationSource}
                         disabled={verificationInFlight}
                     />
+                    {mergedVerificationOptionGroups.map((optionGroup) => (
+                        <div key={optionGroup.id} className="mt-3">
+                            <SourceOptionSelector
+                                title={optionGroup.label}
+                                helperText={optionGroup.helper_text}
+                                options={optionGroup.options}
+                                selectedIds={getMergedSelectedSourceOptionIds(selectedVerificationSourceOptions, optionGroup.source_ids, optionGroup.id)}
+                                onToggle={(optionId) => toggleVerificationSourceOption(optionGroup.source_ids, optionGroup.id, optionId)}
+                                disabled={verificationInFlight}
+                            />
+                        </div>
+                    ))}
                     {sourceConfigError && (
                         <div className="mt-3 text-xs text-amber-300">
                             Source config unavailable: {sourceConfigError}. Verification will fall back to backend defaults.
@@ -496,7 +1001,7 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
                         disabled={verifying}
                         className="command-button mt-5"
                     >
-                        <span>Start Deep Forensic Investigation</span>
+                        <span>{verificationState === 'UNVERIFIED' ? 'Start Deep Forensic Investigation' : 'Re-run Verification'}</span>
                     </button>
                 )}
 
@@ -511,8 +1016,111 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
                     </div>
                 )}
 
+                <div className="mt-6 rounded-2xl border border-slate-800 bg-slate-950/45 p-4">
+                    <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                        <div>
+                            <div className="section-title">Media Evidence</div>
+                            <div className="mt-2 text-sm font-semibold text-slate-100">
+                                {mediaSummary.total_analyzed || 0} analyzed • {mediaSummary.relevant_images || 0} relevant • {mediaSummary.high_value_evidence || 0} high-value
+                            </div>
+                            <div className="mt-2 text-xs text-slate-500">
+                                Attach images, remove weak evidence, then re-run verification to refresh the media analysis.
+                            </div>
+                        </div>
+
+                        <label className="secondary-button cursor-pointer self-start">
+                            <SystemIcon name="upload" className="h-4 w-4" />
+                            <span>{mediaUploading ? 'Uploading...' : 'Attach Images'}</span>
+                            <input
+                                type="file"
+                                accept="image/jpeg,image/png,image/webp"
+                                multiple
+                                className="hidden"
+                                onChange={(event) => {
+                                    handleUploadMedia(event.target.files);
+                                    event.target.value = '';
+                                }}
+                            />
+                        </label>
+                    </div>
+
+                    {mediaError && (
+                        <div className="mt-4 rounded-xl border border-red-400/25 bg-red-400/10 px-4 py-3 text-sm text-red-100">
+                            {mediaError}
+                        </div>
+                    )}
+
+                    {mediaLoading ? (
+                        <div className="mt-4 text-sm text-slate-400">Loading media evidence...</div>
+                    ) : alertMedia.length === 0 ? (
+                        <div className="mt-4 rounded-2xl border border-slate-800 bg-slate-950/60 p-4 text-sm text-slate-500">
+                            No images attached to this alert yet.
+                        </div>
+                    ) : (
+                        <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                            {alertMedia.map((media) => (
+                                <div key={media.id} className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-950/70">
+                                    <div className="aspect-[4/3] overflow-hidden bg-slate-950/80">
+                                        <img
+                                            src={resolveMediaUrl(media.preview_url || media.source_url)}
+                                            alt={media.analysis_summary?.description || formatOriginLabel(media.origin)}
+                                            className="h-full w-full object-cover"
+                                        />
+                                    </div>
+
+                                    <div className="space-y-3 p-4">
+                                        <div className="flex flex-wrap gap-2">
+                                            <span className="rounded-full border border-cyan-300/20 bg-cyan-300/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-cyan-100">
+                                                {formatOriginLabel(media.origin)}
+                                            </span>
+                                            <span className="rounded-full border border-slate-700 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-300">
+                                                {media.analysis_status || 'PENDING'}
+                                            </span>
+                                        </div>
+
+                                        <div className="text-sm font-semibold text-slate-100">
+                                            {media.analysis_summary?.description || 'Pending media analysis'}
+                                        </div>
+
+                                        <div className="flex flex-wrap gap-2 text-[11px] text-slate-400">
+                                            {media.analysis_summary?.evidence_type && <span>Type: {media.analysis_summary.evidence_type}</span>}
+                                            {media.analysis_summary?.verification_value && <span>Value: {media.analysis_summary.verification_value}</span>}
+                                            {typeof media.analysis_summary?.is_relevant === 'boolean' && (
+                                                <span>{media.analysis_summary.is_relevant ? 'Relevant' : 'Not relevant'}</span>
+                                            )}
+                                        </div>
+
+                                        <div className="flex items-center justify-between gap-3">
+                                            {media.source_url ? (
+                                                <a
+                                                    href={media.source_url}
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                    className="text-xs text-cyan-200 hover:text-cyan-100"
+                                                >
+                                                    View source
+                                                </a>
+                                            ) : <span className="text-xs text-slate-500">Temporary upload</span>}
+
+                                            <button
+                                                type="button"
+                                                onClick={() => handleDeleteMedia(media.id)}
+                                                disabled={removingMediaId === media.id}
+                                                className="secondary-button px-3 py-2 text-xs"
+                                            >
+                                                <SystemIcon name="x" className="h-4 w-4" />
+                                                <span>{removingMediaId === media.id ? 'Removing...' : 'Remove'}</span>
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+
                 {(verificationData || verificationScore != null || verificationState === 'VERIFIED' || verificationState === 'DISPUTED') && (
-                    <div className="mt-6 grid gap-6 xl:grid-cols-[300px,minmax(0,1fr)]">
+                    <div className="mt-6 grid gap-6 xl:grid-cols-[340px,minmax(0,1fr)]">
                         <div className="space-y-4">
                             <div className="rounded-2xl border border-slate-800 bg-slate-950/45 p-4">
                                 <div className="section-title">Sources Corroborating Event</div>
@@ -526,6 +1134,13 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
                                         : 'No sources confirmed this event yet'}
                                 </div>
                             </div>
+
+                            <ScoreBreakdownCard
+                                scoreBreakdown={scoreBreakdown}
+                                verificationScore={verificationScore}
+                            />
+
+                            <VerificationAgentsCard agents={verificationAgents} />
 
                             {verificationSourceSelection?.resolved_details?.length > 0 && (
                                 <div className="rounded-2xl border border-slate-800 bg-slate-950/45 p-4">
@@ -545,6 +1160,44 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
                                             Ignored unavailable sources: {verificationSourceSelection.ignored_unavailable.join(', ')}
                                         </div>
                                     )}
+                                    {(() => {
+                                        const twitterSelections = Object.values(verificationSourceSelection.resolved_source_options || {})
+                                            .map((optionGroups) => optionGroups.twitter_accounts?.resolved_details || [])
+                                            .flat();
+                                        const uniqueTwitterSelections = [...new Map(twitterSelections.map((option) => [option.id, option])).values()];
+
+                                        if (uniqueTwitterSelections.length === 0) {
+                                            return null;
+                                        }
+
+                                        return (
+                                            <div className="mt-3">
+                                                <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500">
+                                                    Twitter Accounts
+                                                </div>
+                                                <div className="mt-2 flex flex-wrap gap-2">
+                                                    {uniqueTwitterSelections.map((option) => (
+                                                        <span
+                                                            key={option.id}
+                                                            className="rounded-full border border-slate-700 bg-slate-900/60 px-3 py-1 text-xs text-slate-300"
+                                                        >
+                                                            {option.handle ? `@${option.handle}` : option.label}
+                                                        </span>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        );
+                                    })()}
+                                    {searchKeywords?.combined_query && (
+                                        <div className="mt-3 rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+                                            <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500">
+                                                Search Query
+                                            </div>
+                                            <div className="mt-2 text-xs leading-5 text-slate-300">
+                                                {searchKeywords.combined_query}
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
                             )}
 
@@ -559,6 +1212,13 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
                                 <div className="mt-3 text-xs text-slate-500">
                                     Credibility: <span className={`font-semibold uppercase tracking-[0.16em] ${credibilityTone}`}>{credibility || 'N/A'}</span>
                                 </div>
+                                {mediaAnalysis?.analyzed && (
+                                    <div className="mt-3 text-xs text-slate-500">
+                                        Metadata available on {mediaAnalysis.summary?.metadata_available_count || 0} image{(mediaAnalysis.summary?.metadata_available_count || 0) === 1 ? '' : 's'}.
+                                        {' '}
+                                        Warnings found on {mediaAnalysis.summary?.metadata_warning_count || 0} image{(mediaAnalysis.summary?.metadata_warning_count || 0) === 1 ? '' : 's'}.
+                                    </div>
+                                )}
                             </div>
                         </div>
 
@@ -566,9 +1226,14 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
                             <SourceListCard
                                 icon="social"
                                 title="Twitter"
-                                count={`${socialSources.length || socialSamples.length || 0} results`}
+                                count={`${socialSources.length || socialSamples.length || 0} results${socialAccountsSearched.length ? ` | ${socialAccountsSearched.length} accounts` : ''}`}
                                 status="Click to expand"
                             >
+                                {socialAccountsSearched.length > 0 && (
+                                    <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3 text-xs leading-5 text-slate-400">
+                                        Accounts searched: {socialAccountsSearched.map((handle) => `@${handle}`).join(', ')}
+                                    </div>
+                                )}
                                 {socialSources.length > 0 ? socialSources.map((tweet, index) => (
                                     <SourceRow
                                         key={index}
@@ -664,6 +1329,8 @@ function AlertReviewPanel({ selectedAlert, socket, onAlertUpdated, onClearSelect
                                     </div>
                                 )}
                             </SourceListCard>
+
+                            <MediaAnalysisCard mediaAnalysis={mediaAnalysis} />
                         </div>
                     </div>
                 )}

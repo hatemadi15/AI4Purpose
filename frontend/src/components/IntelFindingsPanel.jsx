@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { createAlertFromFinding } from '../services/api';
+import { createAlertFromFinding, uploadFindingMedia } from '../services/api';
 import SystemIcon from './SystemIcon';
 
 const SEVERITY_COLORS = {
@@ -39,17 +39,25 @@ function formatTime(dateStr) {
 function FindingsEmptyState() {
     return (
         <div className="panel p-6 text-center">
-            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full border border-slate-800 bg-slate-950/60">
-                <SystemIcon name="feed" className="h-6 w-6 text-slate-500" />
-            </div>
             <div className="mt-4 text-sm font-semibold text-slate-200">No Intel Findings</div>
             <div className="mt-2 text-xs text-slate-500">Trigger a detection scan to gather intelligence from sources</div>
         </div>
     );
 }
 
-function IntelFindingsPanel({ findings = [], recommendations = [], region, onAlertCreated }) {
+function getFindingKey(finding) {
+    if (!finding) {
+        return '';
+    }
+
+    return String(finding.finding_id || finding.id || '');
+}
+
+function IntelFindingsPanel({ findings = [], latestFindings = [], recommendations = [], region, onAlertCreated }) {
     const [creating, setCreating] = useState(null);
+    const [uploadingMedia, setUploadingMedia] = useState(null);
+    const [mediaCounts, setMediaCounts] = useState({});
+    const [statusMessage, setStatusMessage] = useState('');
     const [selectedSeverity, setSelectedSeverity] = useState('HIGH');
     const [error, setError] = useState(null);
 
@@ -60,7 +68,10 @@ function IntelFindingsPanel({ findings = [], recommendations = [], region, onAle
         try {
             const response = await createAlertFromFinding(finding, region, selectedSeverity);
             if (response.data.success) {
-                onAlertCreated?.(response.data);
+                onAlertCreated?.({
+                    ...response.data,
+                    finding_id: response.data.finding_id || finding.finding_id || finding.id || null
+                });
             }
         } catch (err) {
             setError(err.response?.data?.error || err.message);
@@ -69,7 +80,39 @@ function IntelFindingsPanel({ findings = [], recommendations = [], region, onAle
         }
     };
 
-    if (findings.length === 0 && recommendations.length === 0) {
+    const handleUploadMedia = async (finding, files) => {
+        const findingId = finding.finding_id || finding.id;
+        const normalizedFiles = Array.from(files || []);
+        if (!findingId || normalizedFiles.length === 0) {
+            return;
+        }
+
+        setUploadingMedia(findingId);
+        setError(null);
+        setStatusMessage('');
+
+        try {
+            const response = await uploadFindingMedia(findingId, normalizedFiles);
+            const count = response.data?.media?.length || 0;
+            setMediaCounts((current) => ({ ...current, [findingId]: count }));
+            setStatusMessage(`Attached ${normalizedFiles.length} image${normalizedFiles.length === 1 ? '' : 's'} to ${finding.title || finding.description || 'finding'}.`);
+        } catch (err) {
+            setError(err.response?.data?.error || err.message);
+        } finally {
+            setUploadingMedia(null);
+        }
+    };
+
+    const getFindingMediaCount = (finding) => {
+        const findingId = finding.finding_id || finding.id;
+        if (!findingId) {
+            return finding.media_count || 0;
+        }
+
+        return mediaCounts[findingId] ?? finding.media_count ?? 0;
+    };
+
+    if (findings.length === 0 && latestFindings.length === 0 && recommendations.length === 0) {
         return <FindingsEmptyState />;
     }
 
@@ -125,20 +168,44 @@ function IntelFindingsPanel({ findings = [], recommendations = [], region, onAle
                                                 </span>
                                             </div>
                                             <p className="mt-2 text-sm leading-6 text-slate-300">{recommendation.description}</p>
-                                            <div className="mt-3 text-xs text-slate-400">
+                                    <div className="mt-3 text-xs text-slate-400">
                                                 {recommendation.source_count} source{recommendation.source_count > 1 ? 's' : ''}: {recommendation.sources?.join(', ')}
+                                            </div>
+                                            <div className="mt-2 text-xs text-slate-500">
+                                                Evidence attached: {getFindingMediaCount(finding)}
                                             </div>
                                         </div>
 
-                                        <button
-                                            type="button"
-                                            onClick={() => handleCreateAlert(finding)}
-                                            disabled={creating === recommendation.id}
-                                            className="secondary-button min-w-[160px]"
-                                        >
-                                            <SystemIcon name="plus" className="h-4 w-4" />
-                                            <span>{creating === recommendation.id ? 'Creating...' : 'Create Alert'}</span>
-                                        </button>
+                                        <div className="flex min-w-[160px] flex-col gap-2">
+                                            <label className="secondary-button cursor-pointer justify-center">
+                                                <SystemIcon name="upload" className="h-4 w-4" />
+                                                <span>
+                                                    {uploadingMedia === (finding.finding_id || finding.id)
+                                                        ? 'Uploading...'
+                                                        : `Attach Images${getFindingMediaCount(finding) > 0 ? ` (${getFindingMediaCount(finding)})` : ''}`}
+                                                </span>
+                                                <input
+                                                    type="file"
+                                                    accept="image/jpeg,image/png,image/webp"
+                                                    multiple
+                                                    className="hidden"
+                                                    onChange={(event) => {
+                                                        handleUploadMedia(finding, event.target.files);
+                                                        event.target.value = '';
+                                                    }}
+                                                />
+                                            </label>
+
+                                            <button
+                                                type="button"
+                                                onClick={() => handleCreateAlert(finding)}
+                                                disabled={creating === recommendation.id}
+                                                className="secondary-button min-w-[160px]"
+                                            >
+                                                <SystemIcon name="plus" className="h-4 w-4" />
+                                                <span>{creating === recommendation.id ? 'Creating...' : 'Create Alert'}</span>
+                                            </button>
+                                        </div>
                                     </div>
                                 </div>
                             );
@@ -147,13 +214,98 @@ function IntelFindingsPanel({ findings = [], recommendations = [], region, onAle
                 </div>
             )}
 
+            {latestFindings.length > 0 && (
+                <div className="panel p-4">
+                    <div className="flex items-center justify-between gap-3">
+                        <div>
+                            <div className="section-title">Latest Search</div>
+                            <h3 className="mt-2 text-lg font-semibold text-slate-50">New Findings ({latestFindings.length})</h3>
+                        </div>
+                        <SystemIcon name="search" className="h-5 w-5 text-cyan-200" />
+                    </div>
+
+                    <div className="mt-4 space-y-2">
+                        {latestFindings.map((finding, idx) => (
+                            <div
+                                key={getFindingKey(finding) || idx}
+                                className="rounded-2xl border border-cyan-300/25 bg-cyan-300/5 p-3 transition-all hover:border-cyan-300/40"
+                            >
+                                <div className="flex items-start gap-3">
+                                    <div className="mt-0.5 flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl border border-cyan-300/20 bg-slate-950/65">
+                                        <SystemIcon name={SOURCE_ICONS[finding.source_type] || 'document'} className="h-[18px] w-[18px] text-cyan-100" />
+                                    </div>
+
+                                    <div className="min-w-0 flex-1">
+                                        <div className="flex flex-wrap items-center gap-2">
+                                            <span className="inline-flex max-w-full items-center rounded-full border border-cyan-300/20 px-2.5 py-1 text-[9px] font-semibold uppercase leading-none tracking-[0.1em] text-cyan-100 whitespace-nowrap">
+                                                {finding.type?.replace(/_/g, ' ') || 'Intel'}
+                                            </span>
+                                            <span className="text-xs text-slate-500">{formatTime(finding.posted_at)}</span>
+                                        </div>
+
+                                        <div className="mt-2 text-sm font-semibold text-slate-100">
+                                            {finding.title || finding.description}
+                                        </div>
+
+                                        <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-slate-500">
+                                            <span>{finding.source}</span>
+                                            <span>Evidence: {getFindingMediaCount(finding)}</span>
+                                            {finding.url && (
+                                                <a
+                                                    href={finding.url}
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                    className="text-cyan-200 hover:text-cyan-100"
+                                                >
+                                                    <span>View</span>
+                                                </a>
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    <div className="flex flex-col gap-2">
+                                        <label className="secondary-button cursor-pointer px-3 py-2 text-xs">
+                                            <SystemIcon name="upload" className="h-4 w-4" />
+                                            <span>
+                                                {uploadingMedia === (finding.finding_id || finding.id)
+                                                    ? '...'
+                                                    : `Attach${getFindingMediaCount(finding) > 0 ? ` (${getFindingMediaCount(finding)})` : ''}`}
+                                            </span>
+                                            <input
+                                                type="file"
+                                                accept="image/jpeg,image/png,image/webp"
+                                                multiple
+                                                className="hidden"
+                                                onChange={(event) => {
+                                                    handleUploadMedia(finding, event.target.files);
+                                                    event.target.value = '';
+                                                }}
+                                            />
+                                        </label>
+
+                                        <button
+                                            type="button"
+                                            onClick={() => handleCreateAlert(finding)}
+                                            disabled={creating === (finding.id || finding.title)}
+                                            className="secondary-button px-3 py-2 text-xs"
+                                        >
+                                            <SystemIcon name="alert" className="h-4 w-4" />
+                                            <span>{creating === (finding.id || finding.title) ? '...' : 'Alert'}</span>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
+
             <div className="panel p-4">
                 <div className="flex items-center justify-between gap-3">
                     <div>
-                        <div className="section-title">All Intel Findings</div>
-                        <h3 className="mt-2 text-lg font-semibold text-slate-50">All Intel Findings ({findings.length})</h3>
+                        <div className="section-title">History</div>
+                        <h3 className="mt-2 text-lg font-semibold text-slate-50">Findings History ({findings.length})</h3>
                     </div>
-                    <SystemIcon name="feed" className="h-5 w-5 text-cyan-200" />
                 </div>
 
                 {error && (
@@ -162,10 +314,16 @@ function IntelFindingsPanel({ findings = [], recommendations = [], region, onAle
                     </div>
                 )}
 
+                {statusMessage && !error && (
+                    <div className="mt-4 rounded-2xl border border-emerald-400/25 bg-emerald-400/10 px-4 py-3 text-sm text-emerald-100">
+                        {statusMessage}
+                    </div>
+                )}
+
                 <div className="mt-4 space-y-2">
                     {findings.map((finding, idx) => (
                         <div
-                            key={finding.id || idx}
+                            key={getFindingKey(finding) || idx}
                             className="rounded-2xl border border-slate-800 bg-slate-950/45 p-3 transition-all hover:border-slate-700"
                         >
                             <div className="flex items-start gap-3">
@@ -187,6 +345,7 @@ function IntelFindingsPanel({ findings = [], recommendations = [], region, onAle
 
                                     <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-slate-500">
                                         <span>{finding.source}</span>
+                                        <span>Evidence: {getFindingMediaCount(finding)}</span>
                                         {finding.url && (
                                             <a
                                                 href={finding.url}
@@ -200,15 +359,36 @@ function IntelFindingsPanel({ findings = [], recommendations = [], region, onAle
                                     </div>
                                 </div>
 
-                                <button
-                                    type="button"
-                                    onClick={() => handleCreateAlert(finding)}
-                                    disabled={creating === (finding.id || finding.title)}
-                                    className="secondary-button px-3 py-2 text-xs"
-                                >
-                                    <SystemIcon name="alert" className="h-4 w-4" />
-                                    <span>{creating === (finding.id || finding.title) ? '...' : 'Alert'}</span>
-                                </button>
+                                <div className="flex flex-col gap-2">
+                                    <label className="secondary-button cursor-pointer px-3 py-2 text-xs">
+                                        <SystemIcon name="upload" className="h-4 w-4" />
+                                        <span>
+                                            {uploadingMedia === (finding.finding_id || finding.id)
+                                                ? '...'
+                                                : `Attach${getFindingMediaCount(finding) > 0 ? ` (${getFindingMediaCount(finding)})` : ''}`}
+                                        </span>
+                                        <input
+                                            type="file"
+                                            accept="image/jpeg,image/png,image/webp"
+                                            multiple
+                                            className="hidden"
+                                            onChange={(event) => {
+                                                handleUploadMedia(finding, event.target.files);
+                                                event.target.value = '';
+                                            }}
+                                        />
+                                    </label>
+
+                                    <button
+                                        type="button"
+                                        onClick={() => handleCreateAlert(finding)}
+                                        disabled={creating === (finding.id || finding.title)}
+                                        className="secondary-button px-3 py-2 text-xs"
+                                    >
+                                        <SystemIcon name="alert" className="h-4 w-4" />
+                                        <span>{creating === (finding.id || finding.title) ? '...' : 'Alert'}</span>
+                                    </button>
+                                </div>
                             </div>
                         </div>
                     ))}

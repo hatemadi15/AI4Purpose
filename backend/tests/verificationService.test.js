@@ -9,7 +9,8 @@ const {
 test('runVerificationSources only executes enabled providers and skips media when Twitter is disabled', async () => {
     const calls = [];
     const sourceSelection = {
-        resolved: ['newsapi_ai', 'perplexity']
+        resolved: ['newsapi_ai', 'perplexity'],
+        resolved_source_options: {}
     };
 
     const result = await runVerificationSources({
@@ -51,6 +52,109 @@ test('runVerificationSources only executes enabled providers and skips media whe
     assert.equal(result.mediaAnalysis.analyzed, false);
 });
 
+test('runVerificationSources forwards selected Twitter account options', async () => {
+    const receivedOptions = [];
+    const sourceSelection = {
+        resolved: ['twitter_search'],
+        resolved_source_options: {
+            twitter_search: {
+                twitter_accounts: {
+                    resolved: ['eqalerts', 'lbci_news']
+                }
+            }
+        }
+    };
+
+    await runVerificationSources({
+        alertId: 1,
+        io: null,
+        eventDetails: { type: 'EARTHQUAKE', region: 'Lebanon', lat: 33.9, lon: 35.5, description: 'Test event' },
+        searchKeywords: {},
+        sourceSelection,
+        deps: {
+            searchTwitter: async (_eventDetails, _searchKeywords, sourceOptions) => {
+                receivedOptions.push(sourceOptions);
+                return { texts: [], metadata: [], image_urls: [], sources: {} };
+            },
+            searchNews: async () => [],
+            checkWeatherVerification: async () => null,
+            checkSeismicVerification: async () => null,
+            perplexitySearch: async () => ({ independent_confirmation_found: false, total_sources_found: 0, corroborating_sources: 0 }),
+            analyzeMedia: async () => ({ analyzed: false, images: [], summary: {} })
+        }
+    });
+
+    assert.deepEqual(receivedOptions, [{ twitter_accounts: { resolved: ['eqalerts', 'lbci_news'] } }]);
+});
+
+test('runVerificationSources preserves metadata-rich media analysis output', async () => {
+    const result = await runVerificationSources({
+        alertId: 1,
+        io: null,
+        eventDetails: { type: 'EARTHQUAKE', region: 'Lebanon', lat: 33.9, lon: 35.5, description: 'Test event' },
+        searchKeywords: {},
+        sourceSelection: {
+            resolved: ['twitter_search'],
+            resolved_source_options: {}
+        },
+        deps: {
+            searchTwitter: async () => ({
+                texts: [],
+                metadata: [],
+                image_artifacts: [{ source_kind: 'twitter_url', url: 'https://example.com/image.jpg', context: {} }],
+                image_urls: ['https://example.com/image.jpg'],
+                sources: {}
+            }),
+            searchNews: async () => [],
+            checkWeatherVerification: async () => null,
+            checkSeismicVerification: async () => null,
+            perplexitySearch: async () => ({ independent_confirmation_found: false, total_sources_found: 0, corroborating_sources: 0 }),
+            analyzeMedia: async () => ({
+                analyzed: true,
+                summary: {
+                    total_analyzed: 1,
+                    relevant_images: 1,
+                    high_value_evidence: 1,
+                    metadata_available_count: 1,
+                    metadata_warning_count: 1,
+                    reverse_search_performed_count: 1,
+                    reverse_search_warning_count: 1
+                },
+                images: [{
+                    url: 'https://example.com/image.jpg',
+                    metadata: { has_exif: true },
+                    metadata_flags: ['editing_software_tag'],
+                    metadata_notes: ['Metadata references editing software: Adobe Photoshop.'],
+                    metadata_available: true,
+                    metadata_warning: true,
+                    reverse_image_search: {
+                        performed: true,
+                        status: 'searched',
+                        likely_old: true,
+                        confidence: 'high',
+                        summary: 'This image appears in older reporting.',
+                        earliest_known_use: '2024-10-12T08:00:00.000Z',
+                        matches: [{
+                            title: 'Archived article',
+                            url: 'https://example.com/archive',
+                            published_at: '2024-10-12T08:00:00.000Z',
+                            reason: 'Same building facade and smoke pattern.'
+                        }],
+                        notes: ['Earlier reporting predates the claimed incident.']
+                    }
+                }]
+            })
+        }
+    });
+
+    assert.equal(result.mediaAnalysis.summary.metadata_available_count, 1);
+    assert.equal(result.mediaAnalysis.summary.metadata_warning_count, 1);
+    assert.equal(result.mediaAnalysis.summary.reverse_search_performed_count, 1);
+    assert.equal(result.mediaAnalysis.summary.reverse_search_warning_count, 1);
+    assert.deepEqual(result.mediaAnalysis.images[0].metadata_flags, ['editing_software_tag']);
+    assert.equal(result.mediaAnalysis.images[0].reverse_image_search.likely_old, true);
+});
+
 test('calculateVerificationOutcome excludes disabled sources from denominator and score inputs', () => {
     const outcome = calculateVerificationOutcome({
         enabledSourceIds: ['openweather'],
@@ -85,6 +189,10 @@ test('calculateVerificationOutcome excludes disabled sources from denominator an
     assert.equal(outcome.confirmedSources, 1);
     assert.equal(outcome.perplexityTotal, 0);
     assert.equal(outcome.twitterFound, 0);
-    assert.equal(outcome.mediaBonus, 0);
-    assert.equal(outcome.finalScore, 25);
+    assert.equal(outcome.baseScore, 10);
+    assert.equal(outcome.baseScoreSource, 'semantic_score');
+    assert.equal(outcome.scientificBonus, 15);
+    assert.equal(outcome.perplexityBonus, 0);
+    assert.equal(outcome.mediaBonus, 20);
+    assert.equal(outcome.finalScore, 45);
 });

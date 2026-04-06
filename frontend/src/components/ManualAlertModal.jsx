@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import SystemIcon from './SystemIcon';
 
 const EVENT_TYPES = [
@@ -21,6 +21,10 @@ const SEVERITY_LEVELS = [
     { value: 'CRITICAL', label: 'Critical' }
 ];
 
+const MAX_IMAGES = 5;
+const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
+const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+
 function ManualAlertModal({ isOpen, onClose, onSubmit }) {
     const [formData, setFormData] = useState({
         event_type: 'SECURITY_INCIDENT',
@@ -34,12 +38,54 @@ function ManualAlertModal({ isOpen, onClose, onSubmit }) {
         intel_sources: ''
     });
     const [isSubmitting, setIsSubmitting] = useState(false);
+    const [selectedImages, setSelectedImages] = useState([]);
+    const [imagePreviews, setImagePreviews] = useState([]);
+    const [imageError, setImageError] = useState('');
+
+    useEffect(() => {
+        const previews = selectedImages.map((file) => ({
+            name: file.name,
+            url: URL.createObjectURL(file)
+        }));
+
+        setImagePreviews(previews);
+
+        return () => {
+            previews.forEach((preview) => {
+                URL.revokeObjectURL(preview.url);
+            });
+        };
+    }, [selectedImages]);
 
     if (!isOpen) return null;
 
     const handleChange = (e) => {
         const { name, value } = e.target;
         setFormData((prev) => ({ ...prev, [name]: value }));
+    };
+
+    const handleImageSelection = (e) => {
+        const files = Array.from(e.target.files || []);
+        const valid = [];
+
+        for (const file of files.slice(0, MAX_IMAGES)) {
+            if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
+                setImageError('Only JPEG, PNG, and WebP images are supported.');
+                continue;
+            }
+
+            if (file.size > MAX_IMAGE_SIZE_BYTES) {
+                setImageError('Each image must be 10 MB or smaller.');
+                continue;
+            }
+
+            valid.push(file);
+        }
+
+        setSelectedImages(valid);
+        if (valid.length > 0) {
+            setImageError('');
+        }
     };
 
     const handleSubmit = async (e) => {
@@ -55,9 +101,12 @@ function ManualAlertModal({ isOpen, onClose, onSubmit }) {
                 intel_sources: formData.intel_sources
                     .split(',')
                     .map((source) => source.trim())
-                    .filter(Boolean)
+                    .filter(Boolean),
+                images: selectedImages
             };
             await onSubmit(submitData);
+            setSelectedImages([]);
+            setImageError('');
             onClose();
         } catch (error) {
             console.error('Manual alert error:', error);
@@ -200,6 +249,35 @@ function ManualAlertModal({ isOpen, onClose, onSubmit }) {
                             placeholder="Optional notes for internal reference"
                             className="surface-input mt-2 resize-none"
                         />
+                    </div>
+
+                    <div>
+                        <label className="section-title">Attach Images</label>
+                        <input
+                            type="file"
+                            accept="image/jpeg,image/png,image/webp"
+                            multiple
+                            onChange={handleImageSelection}
+                            className="surface-input mt-2"
+                        />
+                        <div className="mt-2 text-xs text-slate-500">
+                            Up to {MAX_IMAGES} images, 10 MB each. Images are analyzed during verification.
+                        </div>
+                        {imageError && (
+                            <div className="mt-3 rounded-xl border border-red-400/25 bg-red-400/10 px-3 py-2 text-xs text-red-100">
+                                {imageError}
+                            </div>
+                        )}
+                        {imagePreviews.length > 0 && (
+                            <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                                {imagePreviews.map((preview) => (
+                                    <div key={preview.url} className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-950/45">
+                                        <img src={preview.url} alt={preview.name} className="h-28 w-full object-cover" />
+                                        <div className="truncate px-3 py-2 text-xs text-slate-400">{preview.name}</div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
                     </div>
 
                     <div className="flex flex-wrap gap-3 pt-2">

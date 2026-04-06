@@ -1,36 +1,11 @@
 const axios = require('axios');
+const { getTwitterAccountsByIds } = require('../config/twitterAccounts');
 require('dotenv').config();
 
 // Time filter: 6 hours in milliseconds
 const MAX_INTEL_AGE_MS = 6 * 60 * 60 * 1000;
 
-// Intel Twitter accounts to monitor
-const INTEL_ACCOUNTS = [
-    // Global/Regional Intel
-    { handle: 'sentdefender', name: 'Sentdefender', type: 'global' },
-    { handle: 'AvichayAdraee', name: 'Avichay Adraee (IDF)', type: 'israel/lebanon' },
-
-    // Major News
-    { handle: 'AlJazeera', name: 'Al Jazeera', type: 'global' },
-    { handle: 'AlArabiya_Brk', name: 'Al Arabiya Breaking', type: 'global' },
-    { handle: 'AlMayadeenLive', name: 'Al Mayadeen', type: 'lebanon/regional' },
-
-    // Lebanese News
-    { handle: 'LBCI_NEWS', name: 'LBCI News', type: 'lebanon' },
-    { handle: 'NaharnetNews', name: 'Naharnet', type: 'lebanon' },
-    { handle: 'MTVLebanonNews', name: 'MTV Lebanon', type: 'lebanon' },
-    { handle: 'Annahar', name: 'Annahar', type: 'lebanon' },
-    { handle: 'lebanon24', name: 'Lebanon 24', type: 'lebanon' },
-    { handle: 'LebanonDebate', name: 'Lebanon Debate', type: 'lebanon' },
-
-    // Lebanese Official/Emergency
-    { handle: 'lebISF', name: 'Lebanese ISF', type: 'lebanon' },
-    { handle: 'tmclebanon', name: 'TMC Lebanon (Traffic)', type: 'lebanon' },
-
-    // Scientific/Alerts
-    { handle: 'EQAlerts', name: 'Earthquake Alerts', type: 'global' },
-    { handle: 'LastQuake', name: 'LastQuake (EMSC)', type: 'global' }
-];
+const INTEL_ACCOUNTS = getTwitterAccountsByIds('twitter');
 
 // Keywords for crisis detection
 const CRISIS_KEYWORDS = [
@@ -54,9 +29,10 @@ function isRecentIntel(timestamp) {
 /**
  * Fetch intel from monitored Twitter accounts - NO keyword filter, only time filter
  */
-async function fetchIntelTwitter(region) {
+async function fetchIntelTwitter(region, sourceOptions = {}) {
     const findings = [];
     const now = new Date();
+    const selectedAccounts = getTwitterAccountsByIds('twitter', sourceOptions.twitter_accounts?.resolved);
 
     // Check if API credentials are configured
     const apiKey = process.env.TWITTER_API_KEY;
@@ -93,7 +69,7 @@ async function fetchIntelTwitter(region) {
         }
 
         // Build queries with bilingual keywords
-        const accountQuery = INTEL_ACCOUNTS.map(a => `from:${a.handle}`).join(' OR ');
+        const accountQuery = selectedAccounts.map((account) => `from:${account.handle}`).join(' OR ');
         const regionKeywords = getRegionKeywords(region);
 
         // Use both English and Arabic keywords
@@ -112,13 +88,15 @@ async function fetchIntelTwitter(region) {
 
         // Run both searches in parallel
         const [trustedResponse, broadResponse] = await Promise.all([
-            axios.get(
-                `https://api.twitter.com/2/tweets/search/recent?query=${encodeURIComponent(trustedQuery)}&max_results=30&tweet.fields=created_at,author_id,text,public_metrics,lang,referenced_tweets&expansions=author_id`,
-                { headers: { 'Authorization': `Bearer ${token}` }, timeout: 15000 }
-            ).catch(e => {
-                console.log('[Intel] Trusted search error:', e.message);
-                return { data: { data: [] } };
-            }),
+            selectedAccounts.length > 0
+                ? axios.get(
+                    `https://api.twitter.com/2/tweets/search/recent?query=${encodeURIComponent(trustedQuery)}&max_results=30&tweet.fields=created_at,author_id,text,public_metrics,lang,referenced_tweets&expansions=author_id`,
+                    { headers: { 'Authorization': `Bearer ${token}` }, timeout: 15000 }
+                ).catch(e => {
+                    console.log('[Intel] Trusted search error:', e.message);
+                    return { data: { data: [] } };
+                })
+                : Promise.resolve({ data: { data: [] } }),
             axios.get(
                 `https://api.twitter.com/2/tweets/search/recent?query=${encodeURIComponent(broadQuery)}&max_results=20&tweet.fields=created_at,author_id,text,public_metrics,lang,referenced_tweets&expansions=author_id`,
                 { headers: { 'Authorization': `Bearer ${token}` }, timeout: 15000 }
@@ -161,13 +139,13 @@ async function fetchIntelTwitter(region) {
             }
 
             const author = allUsers.find(u => u.id === tweet.author_id);
-            const account = INTEL_ACCOUNTS.find(a =>
-                author?.username?.toLowerCase() === a.handle.toLowerCase()
+            const account = selectedAccounts.find((entry) =>
+                author?.username?.toLowerCase() === entry.handle.toLowerCase()
             );
 
             findings.push({
                 id: tweet.id,
-                source: account?.name || author?.username || 'Twitter/X',
+                source: account?.label || author?.username || 'Twitter/X',
                 source_type: tweet.is_from_trusted ? 'intel_twitter' : 'public_twitter',
                 source_handle: `@${author?.username || 'unknown'}`,
                 is_trusted_source: tweet.is_from_trusted,
@@ -188,7 +166,7 @@ async function fetchIntelTwitter(region) {
             success: true,
             findings,
             count: findings.length,
-            accounts_monitored: INTEL_ACCOUNTS.map(a => a.handle),
+            accounts_monitored: selectedAccounts.map((account) => account.handle),
             search_breakdown: {
                 trusted_count: trustedTweets.length,
                 broad_count: broadTweets.length,

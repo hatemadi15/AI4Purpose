@@ -5,6 +5,16 @@ const { findAffectedUsers } = require('../services/geoService');
 const { sendAlertNotifications } = require('../services/pushService');
 const { translateCustomMessage } = require('../services/geminiService');
 const { performDeepVerification } = require('../services/verificationService');
+const {
+    attachUploadedMediaToAlert,
+    collectUploadedFiles,
+    createImageUploadMiddleware,
+    listAlertMedia,
+    parseStringArray,
+    serializeMediaEvidence
+} = require('../services/mediaService');
+
+const uploadImages = createImageUploadMiddleware();
 
 function emitUserAlerts(io, affectedUsers, alert, selectedMessage) {
     if (!io || !affectedUsers?.zones) return;
@@ -64,12 +74,56 @@ router.get('/:id', async (req, res) => {
     }
 });
 
+router.get('/:id/media', async (req, res) => {
+    try {
+        const alert = await Alert.findByPk(req.params.id);
+        if (!alert) {
+            return res.status(404).json({ success: false, error: 'Alert not found' });
+        }
+
+        const media = await listAlertMedia(alert.id);
+        res.json({
+            success: true,
+            media: media.map(serializeMediaEvidence)
+        });
+    } catch (error) {
+        console.error('Get alert media error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+router.post('/:id/media', uploadImages, async (req, res) => {
+    try {
+        const alert = await Alert.findByPk(req.params.id);
+        if (!alert) {
+            return res.status(404).json({ success: false, error: 'Alert not found' });
+        }
+
+        const files = collectUploadedFiles(req);
+        if (files.length === 0) {
+            return res.status(400).json({ success: false, error: 'At least one image is required' });
+        }
+
+        const created = await attachUploadedMediaToAlert(alert.id, files);
+        const media = await listAlertMedia(alert.id);
+
+        res.json({
+            success: true,
+            created: created.map(serializeMediaEvidence),
+            media: media.map(serializeMediaEvidence)
+        });
+    } catch (error) {
+        console.error('Upload alert media error:', error);
+        res.status(400).json({ success: false, error: error.message });
+    }
+});
+
 // POST /api/alerts/:id/verify - Trigger deep multi-source verification
 router.post('/:id/verify', async (req, res) => {
     const io = req.app.get('io');
-    const { source_ids } = req.body || {};
+    const { source_ids, source_options } = req.body || {};
     try {
-        const result = await performDeepVerification(req.params.id, io, source_ids);
+        const result = await performDeepVerification(req.params.id, io, source_ids, source_options);
         res.json({ success: true, ...result });
     } catch (error) {
         console.error('Verification error:', error);
@@ -185,7 +239,7 @@ router.post('/:id/reject', async (req, res) => {
 });
 
 // POST /api/alerts/manual - Create manual alert (analyst-initiated)
-router.post('/manual', async (req, res) => {
+router.post('/manual', uploadImages, async (req, res) => {
     const {
         event_type,
         lat,
@@ -194,9 +248,9 @@ router.post('/manual', async (req, res) => {
         severity = 'MEDIUM',
         message,
         analyst_name = 'Analyst',
-        analyst_notes,
-        intel_sources = []
-    } = req.body;
+        analyst_notes
+    } = req.body || {};
+    const intel_sources = parseStringArray(req.body?.intel_sources);
     const io = req.app.get('io');
 
     try {
@@ -253,6 +307,11 @@ router.post('/manual', async (req, res) => {
             }
         });
 
+        const files = collectUploadedFiles(req);
+        if (files.length > 0) {
+            await attachUploadedMediaToAlert(alert.id, files);
+        }
+
         // Emit to dashboard
         io.emit('manual_alert_status', { status: 'complete', message: 'Manual alert created' });
         io.emit('new_alert_for_review', {
@@ -271,7 +330,7 @@ router.post('/manual', async (req, res) => {
     } catch (error) {
         console.error('Manual alert error:', error);
         io.emit('manual_alert_status', { status: 'error', message: error.message });
-        res.status(500).json({ success: false, error: error.message });
+        res.status(400).json({ success: false, error: error.message });
     }
 });
 
