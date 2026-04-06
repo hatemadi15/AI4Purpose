@@ -5,7 +5,15 @@ import useSocket from '../hooks/useSocket';
 import CountryFlag from '../components/CountryFlag';
 import IntelFindingsPanel from '../components/IntelFindingsPanel';
 import SourceSelector from '../components/SourceSelector';
+import SourceOptionSelector from '../components/SourceOptionSelector';
 import SystemIcon from '../components/SystemIcon';
+import {
+    buildDefaultSourceOptionSelection,
+    getMergedSelectedSourceOptionIds,
+    getMergedSourceOptionGroups,
+    toggleSourceOptionSelection
+} from '../utils/sourceOptions';
+import { FALLBACK_SOURCE_CONFIG } from '../utils/fallbackSourceConfig';
 
 const REGIONS = [
     { id: 'Lebanon', name: 'Lebanon', code: 'lb', theater: '', coords: '33.89N / 35.50E' },
@@ -56,20 +64,22 @@ function PipelineStep({ step, progress }) {
 }
 
 function SourceSummary({ result }) {
-    if (!result?.source_selection?.resolved_details?.length) {
+    const sourceSelection = result?.source_selection;
+
+    if (!sourceSelection?.resolved_details?.length) {
         return null;
     }
 
     return (
-            <div className="panel p-4">
+        <div className="panel p-4">
             <div className="flex flex-wrap items-center gap-2">
                 <div className="section-title">Sources Used</div>
                 <span className="text-xs text-slate-500">
-                    {result.source_selection.used_defaults ? 'backend defaults' : 'custom override'}
+                    {sourceSelection.used_defaults ? 'backend defaults' : 'custom override'}
                 </span>
             </div>
             <div className="mt-3 flex flex-wrap gap-2">
-                {result.source_selection.resolved_details.map((source) => (
+                {sourceSelection.resolved_details.map((source) => (
                     <span
                         key={source.id}
                         className="rounded-full border border-cyan-300/20 bg-cyan-300/10 px-3 py-1 text-xs font-medium text-cyan-100"
@@ -78,9 +88,37 @@ function SourceSummary({ result }) {
                     </span>
                 ))}
             </div>
-            {result.source_selection.ignored_unavailable?.length > 0 && (
+            {(() => {
+                const twitterSelections = Object.values(sourceSelection.resolved_source_options || {})
+                    .map((optionGroups) => optionGroups.twitter_accounts?.resolved_details || [])
+                    .flat();
+                const uniqueTwitterSelections = [...new Map(twitterSelections.map((option) => [option.id, option])).values()];
+
+                if (uniqueTwitterSelections.length === 0) {
+                    return null;
+                }
+
+                return (
+                    <div className="mt-4">
+                        <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500">
+                            Twitter Accounts
+                        </div>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                            {uniqueTwitterSelections.map((option) => (
+                                <span
+                                    key={option.id}
+                                    className="rounded-full border border-slate-700 bg-slate-900/60 px-3 py-1 text-xs text-slate-300"
+                                >
+                                    {option.handle ? `@${option.handle}` : option.label}
+                                </span>
+                            ))}
+                        </div>
+                    </div>
+                );
+            })()}
+            {sourceSelection.ignored_unavailable?.length > 0 && (
                 <div className="mt-3 text-xs text-amber-300">
-                    Ignored unavailable sources: {result.source_selection.ignored_unavailable.join(', ')}
+                    Ignored unavailable sources: {sourceSelection.ignored_unavailable.join(', ')}
                 </div>
             )}
         </div>
@@ -88,6 +126,7 @@ function SourceSummary({ result }) {
 }
 
 function MasterControlPanel() {
+    const fallbackProviders = FALLBACK_SOURCE_CONFIG.detection.providers;
     const navigate = useNavigate();
     const { socket, isConnected } = useSocket();
     const [selectedRegion, setSelectedRegion] = useState('Lebanon');
@@ -97,9 +136,10 @@ function MasterControlPanel() {
     const [result, setResult] = useState(null);
     const [error, setError] = useState(null);
     const [persistedFindings, setPersistedFindings] = useState([]);
-    const [sourceProviders, setSourceProviders] = useState([]);
-    const [selectedSourceIds, setSelectedSourceIds] = useState([]);
-    const [sourceConfigLoaded, setSourceConfigLoaded] = useState(false);
+    const [sourceProviders, setSourceProviders] = useState(fallbackProviders);
+    const [selectedSourceIds, setSelectedSourceIds] = useState(fallbackProviders.filter((provider) => provider.default_enabled).map((provider) => provider.id));
+    const [selectedSourceOptions, setSelectedSourceOptions] = useState(buildDefaultSourceOptionSelection(fallbackProviders));
+    const [sourceConfigLoaded, setSourceConfigLoaded] = useState(true);
     const [sourceConfigError, setSourceConfigError] = useState(null);
 
     useEffect(() => {
@@ -113,11 +153,15 @@ function MasterControlPanel() {
                 const providers = response.data?.detection?.providers || [];
                 setSourceProviders(providers);
                 setSelectedSourceIds(providers.filter((provider) => provider.default_enabled).map((provider) => provider.id));
+                setSelectedSourceOptions(buildDefaultSourceOptionSelection(providers));
                 setSourceConfigLoaded(true);
                 setSourceConfigError(null);
             } catch (err) {
                 if (!active) return;
-                setSourceConfigLoaded(false);
+                setSourceProviders(fallbackProviders);
+                setSelectedSourceIds(fallbackProviders.filter((provider) => provider.default_enabled).map((provider) => provider.id));
+                setSelectedSourceOptions(buildDefaultSourceOptionSelection(fallbackProviders));
+                setSourceConfigLoaded(true);
                 setSourceConfigError(err.response?.data?.error || err.message);
             }
         };
@@ -186,7 +230,8 @@ function MasterControlPanel() {
         try {
             const response = await triggerDetection(
                 selectedRegion,
-                sourceConfigLoaded ? selectedSourceIds : undefined
+                sourceConfigLoaded ? selectedSourceIds : undefined,
+                sourceConfigLoaded ? selectedSourceOptions : undefined
             );
             setResult(response.data);
             setPersistedFindings(response.data?.findings || []);
@@ -205,11 +250,19 @@ function MasterControlPanel() {
         ));
     };
 
+    const toggleSourceOption = (sourceIds, optionGroupId, optionId) => {
+        setSelectedSourceOptions((current) => sourceIds.reduce(
+            (nextSelection, sourceId) => toggleSourceOptionSelection(nextSelection, sourceId, optionGroupId, optionId),
+            current
+        ));
+    };
+
     const selectedRegionData = REGIONS.find((region) => region.id === selectedRegion) || REGIONS[0];
     const triggerDisabled = isDetecting || (sourceConfigLoaded && selectedSourceIds.length === 0);
     const visibleFindings = result?.region === selectedRegion ? (result.findings || []) : persistedFindings;
     const latestFindings = result?.region === selectedRegion ? (result.latest_findings || []) : [];
     const recommendations = result?.region === selectedRegion ? (result.recommendations || []) : [];
+    const mergedSourceOptionGroups = getMergedSourceOptionGroups(sourceProviders, selectedSourceIds);
 
     return (
         <div className="space-y-6">
@@ -243,6 +296,17 @@ function MasterControlPanel() {
                                 onToggle={toggleSource}
                                 disabled={isDetecting}
                             />
+                            {mergedSourceOptionGroups.map((optionGroup) => (
+                                <SourceOptionSelector
+                                    key={optionGroup.id}
+                                    title={optionGroup.label}
+                                    helperText={optionGroup.helper_text}
+                                    options={optionGroup.options}
+                                    selectedIds={getMergedSelectedSourceOptionIds(selectedSourceOptions, optionGroup.source_ids, optionGroup.id)}
+                                    onToggle={(optionId) => toggleSourceOption(optionGroup.source_ids, optionGroup.id, optionId)}
+                                    disabled={isDetecting}
+                                />
+                            ))}
                             {sourceConfigError && (
                                 <div className="mt-3 text-xs text-amber-300">
                                     Source config unavailable: {sourceConfigError}. Detection will fall back to backend defaults.

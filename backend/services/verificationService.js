@@ -8,6 +8,9 @@ const {
     extractImageCandidates,
     syncAlertRemoteMedia
 } = require('./mediaService');
+const { getTwitterAccountsByIds, getTwitterHandlesByIds } = require('../config/twitterAccounts');
+const { createImageArtifact, extractMetadataFromArtifact } = require('./mediaMetadataService');
+const { reverseImageSearch, shouldRunReverseImageSearch } = require('./reverseImageSearchService');
 require('dotenv').config();
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
@@ -16,6 +19,7 @@ const NEWSAPI_AI_URL = 'https://eventregistry.org/api/v1/article/getArticles'; /
 const TWITTER_BEARER_TOKEN = Buffer.from(`${process.env.TWITTER_API_KEY}:${process.env.TWITTER_API_SECRET}`).toString('base64');
 const NEWS_SAME_EVENT_WINDOW_HOURS = parseInt(process.env.NEWS_SAME_EVENT_WINDOW_HOURS || '6', 10);
 const NEWS_SAME_EVENT_WINDOW_MS = NEWS_SAME_EVENT_WINDOW_HOURS * 60 * 60 * 1000;
+const VERIFICATION_THRESHOLD_SCORE = 50;
 
 const EVENT_SYNONYMS = {
     EARTHQUAKE: {
@@ -56,30 +60,63 @@ const EVENT_SYNONYMS = {
     }
 };
 
+const VERIFICATION_AGENT_CATALOG = {
+    gemini_keyword_strategist: {
+        id: 'gemini_keyword_strategist',
+        label: 'Gemini Keyword Strategist',
+        type: 'ai',
+        service: 'Gemini 2.0 Flash',
+        role: 'Generates bilingual search terms before evidence collection starts.'
+    },
+    news_relevance_filter: {
+        id: 'news_relevance_filter',
+        label: 'News Relevance Filter',
+        type: 'system',
+        service: 'Rule-based',
+        role: 'Keeps only same-event news coverage inside the configured time window.'
+    },
+    gemini_vision_analyst: {
+        id: 'gemini_vision_analyst',
+        label: 'Gemini Vision Analyst',
+        type: 'ai',
+        service: 'Gemini 2.0 Flash',
+        role: 'Reviews attached images for relevance and verification value.'
+    },
+    perplexity_independent_researcher: {
+        id: 'perplexity_independent_researcher',
+        label: 'Perplexity Independent Researcher',
+        type: 'ai',
+        service: 'Perplexity',
+        role: 'Looks for independent web corroboration outside the source-specific searches.'
+    },
+    gemini_chief_investigator: {
+        id: 'gemini_chief_investigator',
+        label: 'Gemini Chief Investigator',
+        type: 'ai',
+        service: 'Gemini 2.0 Flash',
+        role: 'Synthesizes all collected evidence into a same-event assessment.'
+    },
+    score_engine: {
+        id: 'score_engine',
+        label: 'Verification Score Engine',
+        type: 'system',
+        service: 'Rule-based',
+        role: 'Combines semantic match, corroboration volume, scientific evidence, web corroboration, and media evidence into the final score.'
+    },
+    gemini_post_verification_writer: {
+        id: 'gemini_post_verification_writer',
+        label: 'Gemini Post-Verification Writer',
+        type: 'ai',
+        service: 'Gemini',
+        role: 'Refreshes multilingual alert templates using verified facts only.'
+    }
+};
+
 function getEventSynonyms(eventType) {
     if (!eventType) return null;
     const key = String(eventType).trim().toUpperCase().replace(/\s+/g, '_');
     return EVENT_SYNONYMS[key] || null;
 }
-
-// Trusted Twitter accounts for crisis/regional news verification
-const TRUSTED_TWITTER_ACCOUNTS = [
-    'EQAlerts',        // Earthquake alerts
-    'AlJazeera',       // Major news
-    'AlArabiya_Brk',   // Breaking news
-    'LBCI_NEWS',       // Lebanese Broadcasting
-    'NaharnetNews',    // Lebanese news
-    'LastQuake',       // Earthquake detection
-    'tmclebanon',      // Traffic/incidents
-    'lebISF',          // Lebanese Security Forces
-    'sentdefender',    // Regional security
-    'lebanon24',       // Lebanese 24/7 news
-    'MTVLebanonNews',  // MTV Lebanon
-    'Annahar',         // Annahar newspaper
-    'AlMayadeenLive',  // Al Mayadeen
-    'AvichayAdraee',   // IDF Arabic spokesman
-    'LebanonDebate'    // Lebanon Debate
-];
 
 // Import intel keywords from intelService
 const { getRegionKeywords } = require('./intelService');
@@ -251,16 +288,17 @@ function collectNewsImageUrls(newsData = []) {
         .filter(Boolean);
 }
 
-function createEmptyTwitterSearchResult() {
+function createEmptyTwitterSearchResult(selectedAccounts = getTwitterHandlesByIds('twitter')) {
     return {
         texts: [],
         metadata: [],
+        image_artifacts: [],
         image_urls: [],
         sources: {
             broad_count: 0,
             trusted_count: 0,
             filtered_count: 0,
-            trusted_accounts_searched: TRUSTED_TWITTER_ACCOUNTS
+            trusted_accounts_searched: selectedAccounts
         }
     };
 }
@@ -281,11 +319,183 @@ function createEmptyScientificVerification() {
     return { weather: null, seismic: null };
 }
 
+function normalizeMediaInput(mediaInput) {
+    if (!mediaInput) {
+        return null;
+    }
+
+    if (typeof mediaInput === 'string') {
+        return createImageArtifact({
+            sourceKind: 'twitter_url',
+            url: mediaInput
+        });
+    }
+
+    return createImageArtifact({
+        sourceKind: mediaInput.source_kind || mediaInput.sourceKind || 'upload',
+        url: mediaInput.url || null,
+        buffer: mediaInput.buffer || null,
+        mimeType: mediaInput.mime_type || mediaInput.mimeType || null,
+        byteSize: mediaInput.byte_size ?? mediaInput.byteSize ?? null,
+        context: mediaInput.context || {}
+    });
+}
+
+function getMediaArtifactsFromTwitterData(twitterData) {
+    const explicitArtifacts = Array.isArray(twitterData?.image_artifacts)
+        ? twitterData.image_artifacts.map(normalizeMediaInput).filter(Boolean)
+        : [];
+
+    if (explicitArtifacts.length > 0) {
+        return explicitArtifacts;
+    }
+
+    return (twitterData?.image_urls || [])
+        .map(normalizeMediaInput)
+        .filter(Boolean);
+}
+
+function buildVerificationAgents({
+    enabledSourceIds = [],
+    searchKeywords = {},
+    outcome,
+    mediaAnalysis = { analyzed: false, summary: {} },
+    geminiResult = {},
+    postVerificationTemplates = null
+}) {
+    const enabledSources = new Set(enabledSourceIds);
+    const keywordCount = (searchKeywords.english_keywords?.length || 0) + (searchKeywords.arabic_keywords?.length || 0);
+    const agents = [
+        {
+            ...VERIFICATION_AGENT_CATALOG.gemini_keyword_strategist,
+            status: keywordCount > 0 ? 'used' : 'fallback',
+            impact: keywordCount > 0
+                ? `${searchKeywords.english_keywords?.length || 0} EN and ${searchKeywords.arabic_keywords?.length || 0} AR search terms generated`
+                : 'Used fallback region and event keywords'
+        },
+        {
+            ...VERIFICATION_AGENT_CATALOG.gemini_chief_investigator,
+            status: 'used',
+            impact: `Semantic match ${outcome.semanticScore}/100, recommendation ${geminiResult.recommendation || 'N/A'}`
+        },
+        {
+            ...VERIFICATION_AGENT_CATALOG.score_engine,
+            status: 'used',
+            impact: `Final score ${outcome.finalScore}/100 -> ${outcome.finalStatus}`
+        }
+    ];
+
+    if (enabledSources.has('newsapi_ai')) {
+        agents.push({
+            ...VERIFICATION_AGENT_CATALOG.news_relevance_filter,
+            status: 'used',
+            impact: `${outcome.newsFound} relevant articles retained within ${NEWS_SAME_EVENT_WINDOW_HOURS}h`
+        });
+    }
+
+    if (enabledSources.has('perplexity')) {
+        agents.push({
+            ...VERIFICATION_AGENT_CATALOG.perplexity_independent_researcher,
+            status: 'used',
+            impact: `${outcome.perplexityCorroborating}/${outcome.perplexityTotal} web sources corroborated the event`
+        });
+    }
+
+    if (enabledSources.has('twitter_search')) {
+        agents.push({
+            ...VERIFICATION_AGENT_CATALOG.gemini_vision_analyst,
+            status: mediaAnalysis.analyzed ? 'used' : 'no_media',
+            impact: mediaAnalysis.analyzed
+                ? `${mediaAnalysis.summary?.total_analyzed || 0} images reviewed, ${mediaAnalysis.summary?.high_value_evidence || 0} high-value`
+                : 'No images available to review'
+        });
+    }
+
+    if (postVerificationTemplates) {
+        agents.push({
+            ...VERIFICATION_AGENT_CATALOG.gemini_post_verification_writer,
+            status: postVerificationTemplates.messages ? 'used' : 'failed',
+            impact: postVerificationTemplates.messages
+                ? `Refreshed ${Object.keys(postVerificationTemplates.messages).length} multilingual template sets`
+                : 'Template refresh failed'
+        });
+    }
+
+    return agents;
+}
+
+function buildScoreBreakdown(outcome) {
+    const scientificDetails = [];
+
+    if (outcome.weatherConfirmed) {
+        scientificDetails.push('OpenWeather confirmation +15');
+    }
+    if (outcome.seismicConfirmed) {
+        scientificDetails.push('USGS confirmation +20');
+    }
+
+    return {
+        threshold_for_verified: VERIFICATION_THRESHOLD_SCORE,
+        formula: 'final = min(100, base + scientific + web + media)',
+        base_score_source: outcome.baseScoreSource,
+        base_score: outcome.baseScore,
+        final_score: outcome.finalScore,
+        final_status: outcome.finalStatus,
+        components: [
+            {
+                id: 'semantic_score',
+                label: 'Gemini semantic match',
+                value: outcome.semanticScore,
+                applied_value: outcome.baseScoreSource === 'semantic_score' ? outcome.semanticScore : 0,
+                detail: outcome.baseScoreSource === 'semantic_score'
+                    ? 'Used as the base score because it was higher than source volume.'
+                    : 'Measured, but source volume became the base score instead.'
+            },
+            {
+                id: 'source_bonus',
+                label: 'Twitter/news corroboration volume',
+                value: outcome.sourceBonus,
+                applied_value: outcome.baseScoreSource === 'source_bonus' ? outcome.sourceBonus : 0,
+                detail: `${outcome.twitterFound} Twitter hits and ${outcome.newsFound} news hits -> ${outcome.sourceBonus} points (cap 30)`
+            },
+            {
+                id: 'scientific_bonus',
+                label: 'Scientific confirmation bonus',
+                value: outcome.scientificBonus,
+                applied_value: outcome.scientificBonus,
+                detail: scientificDetails.length > 0 ? scientificDetails.join(', ') : 'No scientific bonus applied'
+            },
+            {
+                id: 'perplexity_bonus',
+                label: 'Independent web corroboration bonus',
+                value: outcome.perplexityBonus,
+                applied_value: outcome.perplexityBonus,
+                detail: `${outcome.perplexityCorroborating} corroborating web sources contributed up to 15 points`
+            },
+            {
+                id: 'media_bonus',
+                label: 'Visual evidence bonus',
+                value: outcome.mediaBonus,
+                applied_value: outcome.mediaBonus,
+                detail: `${outcome.highValueMediaEvidence} high-value images contributed up to 20 points`
+            }
+        ],
+        explanation: [
+            `Base score came from ${outcome.baseScoreSource === 'semantic_score' ? 'Gemini semantic match' : 'source corroboration volume'} at ${outcome.baseScore}.`,
+            `Scientific bonus added ${outcome.scientificBonus}, web corroboration added ${outcome.perplexityBonus}, and media evidence added ${outcome.mediaBonus}.`,
+            `Alerts are marked VERIFIED at ${VERIFICATION_THRESHOLD_SCORE}+; this run finished at ${outcome.finalScore}.`
+        ]
+    };
+}
+
 // --- A. Real Twitter Search (Twitter API v2 Recent Search) with RELEVANCE FILTERING ---
 // --- A. Real Twitter Search (Twitter API v2 Recent Search) with RELEVANCE FILTERING ---
 // --- A. Real Twitter Search (Twitter API v2 Recent Search) with RELEVANCE FILTERING ---
-async function searchTwitter(eventDetails, searchKeywords) {
+async function searchTwitter(eventDetails, searchKeywords, sourceOptions = {}) {
     try {
+        const trustedTwitterAccounts = getTwitterAccountsByIds('twitter', sourceOptions.twitter_accounts?.resolved);
+        const trustedAccountHandles = trustedTwitterAccounts.map((account) => account.handle);
+
         const rawLocationKeywordsEn = [
             eventDetails.region,
             ...(searchKeywords?.location_terms?.english || [])
@@ -362,7 +572,7 @@ async function searchTwitter(eventDetails, searchKeywords) {
 
         if (!process.env.TWITTER_API_KEY || !process.env.TWITTER_API_SECRET) {
             console.warn('[Twitter] Missing API credentials; skipping Twitter verification');
-            return createEmptyTwitterSearchResult();
+            return createEmptyTwitterSearchResult(trustedAccountHandles);
         }
 
         // 1. Get Access Token using Basic Auth
@@ -411,14 +621,14 @@ async function searchTwitter(eventDetails, searchKeywords) {
         // Query 3: Trusted accounts WITH STRICT EVENT FILTER (Chunked)
         // Split 15 accounts into chunks of 5 to avoid URL length error (Status 414/400)
         const chunkArray = (arr, size) => arr.reduce((acc, _, i) => (i % size) ? acc : [...acc, arr.slice(i, i + size)], []);
-        const accountChunks = chunkArray(TRUSTED_TWITTER_ACCOUNTS, 5);
+        const accountChunks = chunkArray(trustedAccountHandles, 5);
 
         // Filter: INCREASED to Top 10 mixed events (Chunking affords us more URL space)
         // This ensures synonyms in both En/Ar are caught (En1, Ar1, En2, Ar2 ... En5, Ar5)
         const eventFilterKeywords = eventKeywordsMixed.slice(0, 10).join(' OR ');
 
         if (eventFilterKeywords) {
-            console.log(`[Twitter] Searching ${TRUSTED_TWITTER_ACCOUNTS.length} Trusted Accounts in ${accountChunks.length} chunks with filter: (${eventFilterKeywords})`);
+            console.log(`[Twitter] Searching ${trustedAccountHandles.length} Trusted Accounts in ${accountChunks.length} chunks with filter: (${eventFilterKeywords})`);
 
             accountChunks.forEach((chunk, index) => {
                 const accountsStr = chunk.map(acc => `from:${acc}`).join(' OR ');
@@ -480,7 +690,7 @@ async function searchTwitter(eventDetails, searchKeywords) {
 
             // Trust Bonus
             const authorName = users.get(tweet.author_id);
-            const isTrusted = TRUSTED_TWITTER_ACCOUNTS.some(acc => acc.toLowerCase() === authorName?.toLowerCase());
+            const isTrusted = trustedAccountHandles.some((account) => account.toLowerCase() === authorName?.toLowerCase());
 
             if (isTrusted) relevanceScore += 2;
 
@@ -504,11 +714,29 @@ async function searchTwitter(eventDetails, searchKeywords) {
 
         console.log(`[Twitter] Filtered: ${allTweets.length} -> ${relevantTweets.length} results (${relevantTweets.filter(t => t.is_trusted).length} trusted)`);
 
-        const imageUrls = relevantTweets
-            .flatMap(t => t.media || [])
-            .filter(m => m.type === 'photo')
-            .map(m => m.url || m.preview_image_url)
-            .filter(Boolean);
+        const imageArtifacts = [];
+        const seenImageUrls = new Set();
+
+        for (const tweet of relevantTweets) {
+            const username = users.get(tweet.author_id) || 'unknown';
+            for (const media of tweet.media || []) {
+                if (media.type !== 'photo') continue;
+
+                const mediaUrl = media.url || media.preview_image_url;
+                if (!mediaUrl || seenImageUrls.has(mediaUrl)) continue;
+
+                seenImageUrls.add(mediaUrl);
+                imageArtifacts.push({
+                    source_kind: 'twitter_url',
+                    url: mediaUrl,
+                    context: {
+                        tweet_created_at: tweet.created_at,
+                        username,
+                        is_trusted: tweet.is_trusted
+                    }
+                });
+            }
+        }
 
         return {
             texts: relevantTweets.map(t => t.text),
@@ -520,19 +748,22 @@ async function searchTwitter(eventDetails, searchKeywords) {
                 is_trusted: t.is_trusted,
                 relevance_score: t.relevanceScore
             })),
-            image_urls: imageUrls,
+            image_artifacts: imageArtifacts,
+            image_urls: imageArtifacts.map((artifact) => artifact.url),
             sources: {
                 broad_count: allTweets.length,
                 trusted_count: relevantTweets.filter(t => t.is_trusted).length,
                 filtered_count: relevantTweets.length,
-                trusted_accounts_searched: TRUSTED_TWITTER_ACCOUNTS,
+                trusted_accounts_searched: trustedAccountHandles,
                 filter_keywords: { location: allLocationKeywords.slice(0, 3), event: allEventKeywords.slice(0, 4) }
             }
         };
 
     } catch (error) {
         console.error('[Twitter] Error:', error.response?.data || error.message);
-        return createEmptyTwitterSearchResult();
+        return createEmptyTwitterSearchResult(
+            getTwitterHandlesByIds('twitter', sourceOptions.twitter_accounts?.resolved)
+        );
     }
 }
 
@@ -799,11 +1030,15 @@ async function runVerificationSources({
         searchNews,
         checkWeatherVerification,
         checkSeismicVerification,
-        perplexitySearch
+        perplexitySearch,
+        analyzeMedia
     }
 }) {
     const enabledSources = new Set(sourceSelection.resolved);
-    let twitterData = createEmptyTwitterSearchResult();
+    const twitterSourceOptions = sourceSelection.resolved_source_options?.twitter_search || {};
+    let twitterData = createEmptyTwitterSearchResult(
+        getTwitterHandlesByIds('twitter', twitterSourceOptions.twitter_accounts?.resolved)
+    );
     let mediaAnalysis = { analyzed: false, images: [] };
     let newsData = [];
     const scientificData = createEmptyScientificVerification();
@@ -811,7 +1046,13 @@ async function runVerificationSources({
 
     if (enabledSources.has('twitter_search')) {
         if (io) io.emit('verification_progress', { alertId, step: 'Searching Twitter for eyewitness reports...' });
-        twitterData = await deps.searchTwitter(eventDetails, searchKeywords);
+        twitterData = await deps.searchTwitter(eventDetails, searchKeywords, twitterSourceOptions);
+
+        const mediaArtifacts = getMediaArtifactsFromTwitterData(twitterData);
+        if (mediaArtifacts.length > 0) {
+            if (io) io.emit('verification_progress', { alertId, step: `Analyzing ${mediaArtifacts.length} media images...` });
+            mediaAnalysis = await deps.analyzeMedia(mediaArtifacts, eventDetails);
+        }
     }
 
     if (enabledSources.has('newsapi_ai')) {
@@ -888,13 +1129,15 @@ function calculateVerificationOutcome({
     const confirmedSources = geminiAnalyzed + scientificConfirmed + perplexityCorroborating + twitterCorroborating + newsCorroborating;
     const sourceBonus = Math.min(30, (twitterFound + newsFound) * 2);
     const baseScore = Math.max(semanticScore, sourceBonus);
+    const baseScoreSource = semanticScore >= sourceBonus ? 'semantic_score' : 'source_bonus';
     const scientificBonus = (weatherConfirmed ? 15 : 0) + (seismicConfirmed ? 20 : 0);
     const perplexityBonus = perplexityCorroborating > 0 ? Math.min(perplexityCorroborating * 5, 15) : 0;
     const mediaBonus = mediaAnalysis.summary?.high_value_evidence > 0
         ? Math.min(mediaAnalysis.summary.high_value_evidence * 10, 20)
         : 0;
+    const highValueMediaEvidence = mediaAnalysis.summary?.high_value_evidence || 0;
     const finalScore = Math.min(100, baseScore + scientificBonus + perplexityBonus + mediaBonus);
-    const finalStatus = finalScore >= 50 ? 'VERIFIED' : 'DISPUTED';
+    const finalStatus = finalScore >= VERIFICATION_THRESHOLD_SCORE ? 'VERIFIED' : 'DISPUTED';
 
     return {
         totalSources,
@@ -911,9 +1154,259 @@ function calculateVerificationOutcome({
         newsCorroborating,
         perplexityTotal,
         perplexityCorroborating,
+        sourceBonus,
+        baseScore,
+        baseScoreSource,
+        scientificBonus,
+        perplexityBonus,
+        highValueMediaEvidence,
         mediaBonus,
         finalScore,
         finalStatus
+    };
+}
+
+// --- C2. Media Analysis using Gemini Vision ---
+async function analyzeMedia(imageInputs, eventDetails) {
+    const mediaArtifacts = (imageInputs || [])
+        .map(normalizeMediaInput)
+        .filter((artifact) => artifact?.url);
+    const maxAutomaticReverseSearches = Math.max(
+        0,
+        parseInt(process.env.MAX_AUTOMATIC_REVERSE_SEARCHES_PER_ALERT || '1', 10)
+    );
+
+    if (mediaArtifacts.length === 0) {
+        console.log('[Media] No images to analyze');
+        return { analyzed: false, images: [] };
+    }
+
+    console.log(`[Media] Analyzing ${mediaArtifacts.length} images...`);
+
+    try {
+        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const results = [];
+        let automaticReverseSearches = 0;
+
+        // Analyze up to 3 images
+        for (const mediaArtifact of mediaArtifacts.slice(0, 3)) {
+            let artifact = mediaArtifact;
+            let metadataResult = null;
+
+            try {
+                // Fetch image and convert to base64
+                const imageResponse = await axios.get(mediaArtifact.url, {
+                    responseType: 'arraybuffer',
+                    timeout: 10000
+                });
+                const buffer = Buffer.from(imageResponse.data);
+                const mimeType = imageResponse.headers['content-type'] || mediaArtifact.mime_type || 'image/jpeg';
+                artifact = createImageArtifact({
+                    sourceKind: mediaArtifact.source_kind,
+                    url: mediaArtifact.url,
+                    buffer,
+                    mimeType,
+                    byteSize: buffer.length,
+                    context: mediaArtifact.context
+                });
+                metadataResult = await extractMetadataFromArtifact(artifact, eventDetails);
+                const base64Image = buffer.toString('base64');
+
+                const prompt = `Analyze this image in the context of verifying a crisis event.
+
+Event being verified:
+- Type: ${eventDetails.type}
+- Location: ${eventDetails.region}
+- Description: ${eventDetails.description?.slice(0, 200) || 'N/A'}
+
+Analyze and return JSON:
+{
+    "is_relevant": true/false (does image relate to the described event?),
+    "content_description": "Brief description of what's shown",
+    "evidence_type": "damage|smoke|fire|crowd|emergency_vehicles|military|aftermath|unrelated",
+    "credibility_indicators": {
+        "appears_authentic": true/false,
+        "signs_of_manipulation": [],
+        "contextual_match": true/false (matches claimed event type/location?)
+    },
+    "verification_value": "high|medium|low|none"
+}`;
+
+                const result = await model.generateContent({
+                    contents: [{
+                        role: 'user',
+                        parts: [
+                            { inlineData: { mimeType, data: base64Image } },
+                            { text: prompt }
+                        ]
+                    }],
+                    generationConfig: { responseMimeType: 'application/json' }
+                });
+
+                const analysis = JSON.parse(result.response.text());
+                const shouldAttemptReverseSearch = automaticReverseSearches < maxAutomaticReverseSearches
+                    && shouldRunReverseImageSearch(metadataResult, analysis);
+                const reverseImageSearchResult = shouldAttemptReverseSearch
+                    ? await reverseImageSearch({
+                        imageArtifact: artifact,
+                        eventDetails,
+                        imageAnalysis: analysis
+                    })
+                    : null;
+                if (reverseImageSearchResult) {
+                    automaticReverseSearches += 1;
+                }
+                results.push({
+                    url: artifact.url,
+                    source_kind: artifact.source_kind,
+                    context: artifact.context,
+                    metadata: metadataResult.metadata,
+                    metadata_flags: metadataResult.metadata_flags,
+                    metadata_notes: metadataResult.metadata_notes,
+                    metadata_available: metadataResult.metadata_available,
+                    metadata_warning: metadataResult.metadata_warning,
+                    reverse_image_search: reverseImageSearchResult,
+                    ...analysis
+                });
+
+                console.log(`[Media] Analyzed: ${analysis.evidence_type} - ${analysis.verification_value} value`);
+            } catch (imgError) {
+                console.error(`[Media] Failed to analyze image: ${imgError.message}`);
+                results.push({
+                    url: artifact.url,
+                    source_kind: artifact.source_kind,
+                    context: artifact.context,
+                    metadata: metadataResult?.metadata || null,
+                    metadata_flags: metadataResult?.metadata_flags || [],
+                    metadata_notes: metadataResult?.metadata_notes || [],
+                    metadata_available: metadataResult?.metadata_available || false,
+                    metadata_warning: metadataResult?.metadata_warning || false,
+                    reverse_image_search: null,
+                    error: imgError.message
+                });
+            }
+        }
+
+        return {
+            analyzed: true,
+            images: results,
+            summary: {
+                total_analyzed: results.filter(r => !r.error).length,
+                relevant_images: results.filter(r => r.is_relevant).length,
+                high_value_evidence: results.filter(r => r.verification_value === 'high').length,
+                metadata_available_count: results.filter(r => r.metadata_available).length,
+                metadata_warning_count: results.filter(r => r.metadata_warning).length,
+                reverse_search_performed_count: results.filter(r => r.reverse_image_search?.performed).length,
+                reverse_search_warning_count: results.filter(r => r.reverse_image_search?.likely_old).length
+            }
+        };
+    } catch (error) {
+        console.error('[Media] Analysis failed:', error.message);
+        return { analyzed: false, error: error.message, images: [] };
+    }
+}
+
+function normalizeMediaAnalysisImage(image = {}) {
+    return {
+        id: image.id,
+        origin: image.origin || null,
+        url: image.url || image.preview_url || image.source_url || null,
+        source_url: image.source_url || image.url || null,
+        source_kind: image.source_kind || image.origin || null,
+        context: image.context || {},
+        evidence_type: image.evidence_type || image.analysis_summary?.evidence_type || null,
+        is_relevant: typeof image.is_relevant === 'boolean' ? image.is_relevant : image.analysis_summary?.is_relevant,
+        verification_value: image.verification_value || image.analysis_summary?.verification_value || null,
+        description: image.description || image.content_description || image.analysis_summary?.description || null,
+        content_description: image.content_description || image.description || image.analysis_summary?.description || null,
+        analysis_status: image.analysis_status || null,
+        metadata: image.metadata || null,
+        metadata_flags: image.metadata_flags || [],
+        metadata_notes: image.metadata_notes || [],
+        metadata_available: Boolean(image.metadata_available),
+        metadata_warning: Boolean(image.metadata_warning),
+        reverse_image_search: image.reverse_image_search || null,
+        error: image.error || null
+    };
+}
+
+function mergeMediaAnalysisSummaries(images = []) {
+    return {
+        total_analyzed: images.filter((image) => !image.error).length,
+        relevant_images: images.filter((image) => image.is_relevant).length,
+        high_value_evidence: images.filter((image) => image.verification_value === 'high').length,
+        metadata_available_count: images.filter((image) => image.metadata_available).length,
+        metadata_warning_count: images.filter((image) => image.metadata_warning).length,
+        reverse_search_performed_count: images.filter((image) => image.reverse_image_search?.performed).length,
+        reverse_search_warning_count: images.filter((image) => image.reverse_image_search?.likely_old).length,
+        by_origin: images.reduce((acc, image) => {
+            if (!image.origin) {
+                return acc;
+            }
+
+            const bucket = acc[image.origin] || { total: 0, relevant: 0, high_value: 0 };
+            bucket.total += 1;
+            if (image.is_relevant) {
+                bucket.relevant += 1;
+            }
+            if (image.verification_value === 'high') {
+                bucket.high_value += 1;
+            }
+            acc[image.origin] = bucket;
+            return acc;
+        }, {})
+    };
+}
+
+function mergeMediaAnalyses(...analyses) {
+    const imageMap = new Map();
+    let analyzed = false;
+
+    for (const analysis of analyses) {
+        if (!analysis) {
+            continue;
+        }
+
+        analyzed = analyzed || Boolean(analysis.analyzed);
+
+        for (const rawImage of analysis.images || []) {
+            const image = normalizeMediaAnalysisImage(rawImage);
+            const key = image.source_url || image.url || image.id || `${image.origin || 'media'}:${image.description || ''}`;
+            const existing = imageMap.get(key);
+            imageMap.set(key, existing
+                ? {
+                    ...existing,
+                    ...image,
+                    origin: image.origin || existing.origin,
+                    url: image.url || existing.url,
+                    source_url: image.source_url || existing.source_url,
+                    source_kind: image.source_kind || existing.source_kind,
+                    context: Object.keys(image.context || {}).length > 0
+                        ? { ...existing.context, ...image.context }
+                        : existing.context,
+                    evidence_type: image.evidence_type || existing.evidence_type,
+                    is_relevant: typeof image.is_relevant === 'boolean' ? image.is_relevant : existing.is_relevant,
+                    verification_value: image.verification_value || existing.verification_value,
+                    description: image.description || existing.description,
+                    content_description: image.content_description || existing.content_description,
+                    analysis_status: image.analysis_status || existing.analysis_status,
+                    metadata: image.metadata || existing.metadata,
+                    metadata_flags: image.metadata_flags?.length ? image.metadata_flags : existing.metadata_flags,
+                    metadata_notes: image.metadata_notes?.length ? image.metadata_notes : existing.metadata_notes,
+                    metadata_available: image.metadata_available || existing.metadata_available,
+                    metadata_warning: image.metadata_warning || existing.metadata_warning,
+                    reverse_image_search: image.reverse_image_search || existing.reverse_image_search,
+                    error: image.error || existing.error
+                }
+                : image);
+        }
+    }
+
+    const images = Array.from(imageMap.values());
+    return {
+        analyzed: analyzed || images.length > 0,
+        images,
+        summary: mergeMediaAnalysisSummaries(images)
     };
 }
 
@@ -1088,12 +1581,12 @@ Output strict JSON:
 }
 
 // --- F. Main Orchestrator ---
-async function performDeepVerification(alertId, io, requestedSourceIds) {
+async function performDeepVerification(alertId, io, requestedSourceIds, requestedSourceOptions) {
     const alert = await Alert.findByPk(alertId);
     if (!alert) throw new Error('Alert not found');
 
     await alert.update({ verification_status: 'VERIFYING' });
-    const sourceSelection = resolveSourceSelection('verification', requestedSourceIds);
+    const sourceSelection = resolveSourceSelection('verification', requestedSourceIds, requestedSourceOptions);
 
     const detectionFinding = alert.detection_data?.finding || alert.all_intel_findings?.finding;
     const detectionDescription = detectionFinding?.description
@@ -1119,6 +1612,7 @@ async function performDeepVerification(alertId, io, requestedSourceIds) {
 
     const {
         twitterData,
+        mediaAnalysis: sourceMediaAnalysis,
         newsData,
         scientificData,
         perplexityData
@@ -1137,19 +1631,11 @@ async function performDeepVerification(alertId, io, requestedSourceIds) {
         newsImageUrls: collectNewsImageUrls(newsData)
     });
 
-    let mediaAnalysis = {
-        analyzed: false,
-        images: [],
-        summary: {
-            total_analyzed: 0,
-            relevant_images: 0,
-            high_value_evidence: 0,
-            by_origin: {}
-        }
-    };
+    let mediaAnalysis = sourceMediaAnalysis || { analyzed: false, images: [], summary: {} };
 
     if (io) io.emit('verification_progress', { alertId, step: 'Analyzing linked media evidence...' });
-    mediaAnalysis = await analyzeAlertMedia(alert.id, eventDetails);
+    const linkedMediaAnalysis = await analyzeAlertMedia(alert.id, eventDetails);
+    mediaAnalysis = mergeMediaAnalyses(sourceMediaAnalysis, linkedMediaAnalysis);
 
     // Step 2: Gemini Synthesis
     if (io) io.emit('verification_progress', { alertId, step: 'Gemini analyzing all sources...' });
@@ -1180,12 +1666,20 @@ async function performDeepVerification(alertId, io, requestedSourceIds) {
     // Step 4: Save Results with full source details including URLs
     const verificationData = {
         source_selection: sourceSelection,
+        search_keywords: {
+            combined_query: searchKeywords.combined_query || '',
+            english_keywords: searchKeywords.english_keywords?.slice(0, 8) || [],
+            arabic_keywords: searchKeywords.arabic_keywords?.slice(0, 8) || [],
+            location_terms: searchKeywords.location_terms || { english: [], arabic: [] },
+            event_terms: searchKeywords.event_terms || { english: [], arabic: [] }
+        },
         gemini: geminiResult,
         perplexity: perplexityData,
         // Twitter: include full metadata with URLs and relevance scores
         twitter_summary: {
             count: outcome.twitterFound,
             filtered_from: (twitterData.sources?.broad_count || 0) + (twitterData.sources?.trusted_count || 0),
+            trusted_accounts_searched: twitterData.sources?.trusted_accounts_searched || [],
             filter_keywords: twitterData.sources?.filter_keywords || {},
             samples: twitterData.texts.slice(0, 5),
             sources: twitterData.metadata?.slice(0, 20).map(m => ({
@@ -1225,13 +1719,19 @@ async function performDeepVerification(alertId, io, requestedSourceIds) {
             images: (mediaAnalysis.images || []).slice(0, 5).map((img) => ({
                 id: img.id,
                 origin: img.origin,
-                url: img.preview_url || img.source_url,
-                source_url: img.source_url,
-                evidence_type: img.analysis_summary?.evidence_type,
-                is_relevant: img.analysis_summary?.is_relevant,
-                verification_value: img.analysis_summary?.verification_value,
-                description: img.analysis_summary?.description,
-                analysis_status: img.analysis_status
+                url: img.url || img.preview_url || img.source_url,
+                source_url: img.source_url || img.url || null,
+                source_kind: img.source_kind,
+                context: img.context || {},
+                evidence_type: img.evidence_type || img.analysis_summary?.evidence_type,
+                is_relevant: typeof img.is_relevant === 'boolean' ? img.is_relevant : img.analysis_summary?.is_relevant,
+                verification_value: img.verification_value || img.analysis_summary?.verification_value,
+                description: img.content_description || img.description || img.analysis_summary?.description,
+                analysis_status: img.analysis_status,
+                metadata: img.metadata || null,
+                metadata_flags: img.metadata_flags || [],
+                metadata_notes: img.metadata_notes || [],
+                reverse_image_search: img.reverse_image_search || null
             }))
         },
         // Web Search: include Perplexity source URLs
@@ -1281,6 +1781,16 @@ async function performDeepVerification(alertId, io, requestedSourceIds) {
             error: error.message
         };
     }
+
+    verificationData.score_breakdown = buildScoreBreakdown(outcome);
+    verificationData.verification_agents = buildVerificationAgents({
+        enabledSourceIds: sourceSelection.resolved,
+        searchKeywords,
+        outcome,
+        mediaAnalysis,
+        geminiResult,
+        postVerificationTemplates: postVerificationTemplates || verificationData.post_verification_templates
+    });
 
     const updatePayload = {
         verification_data: verificationData,

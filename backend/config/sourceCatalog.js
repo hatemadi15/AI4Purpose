@@ -1,4 +1,5 @@
 const { loadBackendEnv } = require('./runtime');
+const { getDefaultTwitterAccountIds, getTwitterAccountCatalog } = require('./twitterAccounts');
 
 loadBackendEnv();
 
@@ -6,6 +7,8 @@ const DEFAULT_ENV_VARS = {
     detection: 'ENABLED_DETECTION_SOURCES',
     verification: 'ENABLED_VERIFICATION_SOURCES'
 };
+
+const OPT_IN_SOURCE_IDS = new Set(['twitter_x', 'intel_twitter', 'twitter_search']);
 
 function hasValue(value) {
     return typeof value === 'string' && value.trim().length > 0;
@@ -33,6 +36,28 @@ function checkTwitterAvailability() {
         };
 }
 
+function createTwitterAccountOptionGroup(sourceId, helperText) {
+    const accounts = getTwitterAccountCatalog(sourceId);
+    if (accounts.length === 0) {
+        return [];
+    }
+
+    return [{
+        id: 'twitter_accounts',
+        label: 'Twitter Accounts',
+        type: 'multi_select',
+        helper_text: helperText,
+        default_selected_ids: getDefaultTwitterAccountIds(sourceId),
+        options: accounts.map((account) => ({
+            id: account.id,
+            label: account.label,
+            handle: account.handle,
+            description: account.description,
+            default_enabled: account.default_enabled
+        }))
+    }];
+}
+
 const SOURCE_CATALOG = {
     detection: [
         { id: 'usgs', label: 'USGS', getAvailability: () => ({ available: true }) },
@@ -40,8 +65,18 @@ const SOURCE_CATALOG = {
         { id: 'openweather', label: 'OpenWeatherMap', getAvailability: () => checkEnvVar('OPENWEATHER_API_KEY') },
         { id: 'tomorrow_io', label: 'Tomorrow.io', getAvailability: () => checkEnvVar('TOMORROW_IO_API_KEY') },
         { id: 'newsapi_ai', label: 'NewsAPI.ai', getAvailability: () => checkEnvVar('NEWSAPI_AI_KEY') },
-        { id: 'twitter_x', label: 'Twitter/X', getAvailability: () => checkTwitterAvailability() },
-        { id: 'intel_twitter', label: 'Intel Twitter', getAvailability: () => checkTwitterAvailability() },
+        {
+            id: 'twitter_x',
+            label: 'Twitter/X',
+            getAvailability: () => checkTwitterAvailability(),
+            getSourceOptions: () => createTwitterAccountOptionGroup('twitter', 'Choose which Twitter accounts to query when Twitter is enabled.')
+        },
+        {
+            id: 'intel_twitter',
+            label: 'Intel Twitter',
+            getAvailability: () => checkTwitterAvailability(),
+            getSourceOptions: () => createTwitterAccountOptionGroup('twitter', 'Choose which Twitter accounts to query when Twitter is enabled.')
+        },
         { id: 'ministry_info', label: 'Ministry Info', getAvailability: () => ({ available: true }) },
         { id: 'google_news', label: 'Google News', getAvailability: () => ({ available: true }) },
         { id: 'mtv_lebanon', label: 'MTV Lebanon', getAvailability: () => ({ available: true }) },
@@ -50,7 +85,12 @@ const SOURCE_CATALOG = {
         { id: 'nna_lebanon', label: 'NNA Lebanon', getAvailability: () => ({ available: true }) }
     ],
     verification: [
-        { id: 'twitter_search', label: 'Twitter Search', getAvailability: () => checkTwitterAvailability() },
+        {
+            id: 'twitter_search',
+            label: 'Twitter Search',
+            getAvailability: () => checkTwitterAvailability(),
+            getSourceOptions: () => createTwitterAccountOptionGroup('twitter', 'Choose which Twitter accounts to query when Twitter is enabled.')
+        },
         { id: 'newsapi_ai', label: 'NewsAPI.ai', getAvailability: () => checkEnvVar('NEWSAPI_AI_KEY') },
         { id: 'openweather', label: 'OpenWeatherMap', getAvailability: () => checkEnvVar('OPENWEATHER_API_KEY') },
         { id: 'usgs', label: 'USGS', getAvailability: () => ({ available: true }) },
@@ -95,11 +135,13 @@ function getStageCatalog(stage) {
 function getStageProviders(stage) {
     return getStageCatalog(stage).map((provider) => {
         const availability = provider.getAvailability();
+        const sourceOptions = provider.getSourceOptions ? provider.getSourceOptions() : [];
         return {
             id: provider.id,
             label: provider.label,
             available: availability.available,
-            reason_unavailable: availability.reason_unavailable || null
+            reason_unavailable: availability.reason_unavailable || null,
+            source_options: sourceOptions
         };
     });
 }
@@ -110,7 +152,9 @@ function getDefaultSourceIds(stage, providers = getStageProviders(stage)) {
     const availableProviders = providers.filter((provider) => provider.available);
 
     if (!hasValue(envValue)) {
-        return availableProviders.map((provider) => provider.id);
+        return availableProviders
+            .filter((provider) => !OPT_IN_SOURCE_IDS.has(provider.id))
+            .map((provider) => provider.id);
     }
 
     const requestedIds = parseSourceList(envValue);
@@ -130,6 +174,7 @@ function buildStageConfig(stage) {
             label: provider.label,
             available: provider.available,
             default_enabled: provider.available && defaultSourceIds.has(provider.id),
+            ...(provider.source_options?.length ? { source_options: provider.source_options } : {}),
             ...(provider.reason_unavailable ? { reason_unavailable: provider.reason_unavailable } : {})
         }))
     };
@@ -142,13 +187,77 @@ function getSourceConfig() {
     };
 }
 
-function resolveSourceSelection(stage, requestedIds) {
+function normalizeSourceOptionSelection(sourceOptions) {
+    if (!sourceOptions || typeof sourceOptions !== 'object' || Array.isArray(sourceOptions)) {
+        return {};
+    }
+
+    const normalized = {};
+    for (const [sourceId, optionGroups] of Object.entries(sourceOptions)) {
+        const normalizedSourceId = normalizeSourceId(sourceId);
+        if (!normalizedSourceId || !optionGroups || typeof optionGroups !== 'object' || Array.isArray(optionGroups)) {
+            continue;
+        }
+
+        normalized[normalizedSourceId] = optionGroups;
+    }
+
+    return normalized;
+}
+
+function normalizeOptionValue(value) {
+    return String(value || '')
+        .trim()
+        .toLowerCase();
+}
+
+function resolveSourceOptionSelection(provider, requestedSourceOptions) {
+    const sourceOptions = provider.source_options || [];
+    if (sourceOptions.length === 0) {
+        return null;
+    }
+
+    const resolvedOptions = {};
+    const sourceRequested = requestedSourceOptions?.[provider.id];
+
+    for (const optionGroup of sourceOptions) {
+        const requestedValues = Array.isArray(sourceRequested?.[optionGroup.id])
+            ? [...new Set(sourceRequested[optionGroup.id].map(normalizeOptionValue).filter(Boolean))]
+            : null;
+        const optionMap = new Map((optionGroup.options || []).map((option) => [normalizeOptionValue(option.id), option]));
+        const requestedOrDefault = requestedValues || optionGroup.default_selected_ids || [];
+        const resolved = [];
+        const ignoredUnknown = [];
+
+        for (const optionId of requestedOrDefault) {
+            const option = optionMap.get(optionId);
+            if (!option) {
+                ignoredUnknown.push(optionId);
+                continue;
+            }
+            resolved.push(option.id);
+        }
+
+        resolvedOptions[optionGroup.id] = {
+            requested: requestedValues,
+            resolved,
+            ignored_unknown: ignoredUnknown,
+            resolved_details: resolved.map((optionId) => optionMap.get(optionId)),
+            used_defaults: !Array.isArray(sourceRequested?.[optionGroup.id])
+        };
+    }
+
+    return resolvedOptions;
+}
+
+function resolveSourceSelection(stage, requestedIds, requestedSourceOptions) {
     const stageConfig = buildStageConfig(stage);
     const providerMap = new Map(stageConfig.providers.map((provider) => [provider.id, provider]));
     const usedDefaults = !Array.isArray(requestedIds);
     const normalizedRequested = Array.isArray(requestedIds)
         ? [...new Set(requestedIds.map(normalizeSourceId).filter(Boolean))]
         : null;
+    const normalizedSourceOptions = normalizeSourceOptionSelection(requestedSourceOptions);
     const requestedOrDefault = normalizedRequested || stageConfig.default_source_ids;
     const ignoredUnknown = [];
     const ignoredUnavailable = [];
@@ -168,6 +277,15 @@ function resolveSourceSelection(stage, requestedIds) {
     }
 
     const resolvedSet = new Set(resolved);
+    const resolvedSourceOptions = {};
+
+    for (const sourceId of resolved) {
+        const provider = providerMap.get(sourceId);
+        const optionSelection = resolveSourceOptionSelection(provider, normalizedSourceOptions);
+        if (optionSelection) {
+            resolvedSourceOptions[sourceId] = optionSelection;
+        }
+    }
 
     return {
         requested: normalizedRequested,
@@ -181,7 +299,8 @@ function resolveSourceSelection(stage, requestedIds) {
         skipped_disabled: stageConfig.providers
             .filter((provider) => provider.available && !resolvedSet.has(provider.id))
             .map((provider) => ({ id: provider.id, label: provider.label })),
-        used_defaults: usedDefaults
+        used_defaults: usedDefaults,
+        resolved_source_options: resolvedSourceOptions
     };
 }
 

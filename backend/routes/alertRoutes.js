@@ -121,9 +121,9 @@ router.post('/:id/media', uploadImages, async (req, res) => {
 // POST /api/alerts/:id/verify - Trigger deep multi-source verification
 router.post('/:id/verify', async (req, res) => {
     const io = req.app.get('io');
-    const { source_ids } = req.body || {};
+    const { source_ids, source_options } = req.body || {};
     try {
-        const result = await performDeepVerification(req.params.id, io, source_ids);
+        const result = await performDeepVerification(req.params.id, io, source_ids, source_options);
         res.json({ success: true, ...result });
     } catch (error) {
         console.error('Verification error:', error);

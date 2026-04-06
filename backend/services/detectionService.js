@@ -1,4 +1,5 @@
 const axios = require('axios');
+const { getTwitterAccountsByIds } = require('../config/twitterAccounts');
 require('dotenv').config();
 
 const DETECTION_WINDOW_HOURS = parseInt(process.env.DETECTION_WINDOW_HOURS || '6', 10);
@@ -252,10 +253,14 @@ async function fetchNewsAPI(region) {
 }
 
 // Fetch Twitter/X crisis mentions (using v2 API)
-async function fetchTwitter(region) {
+async function fetchTwitter(region, sourceOptions = {}) {
     try {
         // Twitter API v2 requires OAuth 2.0 Bearer Token
-        const accounts = ['961NEWS', 'LBCI_NEWS', 'mtv_lebanon', 'RedCrossLebanon'];
+        const accounts = getTwitterAccountsByIds('twitter', sourceOptions.twitter_accounts?.resolved)
+            .map((account) => account.handle);
+        if (accounts.length === 0) {
+            return { source: 'Twitter/X', success: true, data: [], count: 0, accounts_searched: [] };
+        }
         const query = `(earthquake OR tsunami OR flood OR fire OR explosion) (from:${accounts.join(' OR from:')}) -is:retweet -is:reply`;
 
         const startTime = new Date(Date.now() - DETECTION_WINDOW_MS).toISOString();
@@ -289,7 +294,8 @@ async function fetchTwitter(region) {
             source: 'Twitter/X',
             success: true,
             data: tweets,
-            count: tweets.length
+            count: tweets.length,
+            accounts_searched: accounts
         };
     } catch (error) {
         console.error('Twitter fetch error:', error.message);
@@ -419,13 +425,13 @@ const DETECTION_RUNNERS = {
     twitter_x: { label: 'Twitter/X', execute: fetchTwitter }
 };
 
-async function runDetectionSources(region, sourceIds, runnerMap = DETECTION_RUNNERS) {
+async function runDetectionSources(region, sourceIds, runnerMap = DETECTION_RUNNERS, sourceOptionsById = {}) {
     const selectedSourceIds = [...new Set((sourceIds || []).filter((id) => runnerMap[id]))];
     const results = await Promise.all(selectedSourceIds.map(async (sourceId) => {
         const runner = runnerMap[sourceId];
 
         try {
-            const result = await runner.execute(region);
+            const result = await runner.execute(region, sourceOptionsById[sourceId] || {});
             console.log(`${runner.label}: ${result.success ? `${result.count || 0} items` : result.error}`);
             return [sourceId, result];
         } catch (error) {
@@ -515,9 +521,9 @@ function summarizeDetectionResults(region, resultsBySourceId) {
     };
 }
 
-async function detectCrisis(region, sourceIds = Object.keys(DETECTION_RUNNERS)) {
+async function detectCrisis(region, sourceIds = Object.keys(DETECTION_RUNNERS), sourceOptionsById = {}) {
     console.log(`Starting crisis detection for region: ${region}`);
-    const resultsBySourceId = await runDetectionSources(region, sourceIds);
+    const resultsBySourceId = await runDetectionSources(region, sourceIds, DETECTION_RUNNERS, sourceOptionsById);
     const { primaryEvent, summary } = summarizeDetectionResults(region, resultsBySourceId);
 
     return {

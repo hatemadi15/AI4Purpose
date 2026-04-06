@@ -50,10 +50,11 @@ export const getSourceConfig = async ({ retries = 4, retryDelayMs = 800 } = {}) 
 };
 
 // Detection
-export const triggerDetection = (region, sourceIds) =>
+export const triggerDetection = (region, sourceIds, sourceOptions) =>
     api.post('/api/detect', {
         region,
-        ...(sourceIds !== undefined ? { source_ids: sourceIds } : {})
+        ...(sourceIds !== undefined ? { source_ids: sourceIds } : {}),
+        ...(sourceOptions !== undefined ? { source_options: sourceOptions } : {})
     });
 
 export const createAlertFromFinding = (finding, region, severity = 'MEDIUM', radius = 30) =>
@@ -92,8 +93,11 @@ export const approveAlert = (id, data) =>
 export const rejectAlert = (id, data) =>
     api.post(`/api/alerts/${id}/reject`, data);
 
-export const verifyAlert = (id, sourceIds) =>
-    api.post(`/api/alerts/${id}/verify`, sourceIds !== undefined ? { source_ids: sourceIds } : {});
+export const verifyAlert = (id, sourceIds, sourceOptions) =>
+    api.post(`/api/alerts/${id}/verify`, {
+        ...(sourceIds !== undefined ? { source_ids: sourceIds } : {}),
+        ...(sourceOptions !== undefined ? { source_options: sourceOptions } : {})
+    });
 
 export const getAlertMedia = (id) =>
     api.get(`/api/alerts/${id}/media`);

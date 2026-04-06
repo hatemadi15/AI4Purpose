@@ -12,6 +12,8 @@ const { BACKEND_ROOT, REPO_ROOT, resolveSqliteOptions, resolveSqliteStoragePath 
 const { sequelize, Alert, IntelFinding, MediaEvidence } = require('../models');
 const { runDetectionSources, summarizeDetectionResults } = require('../services/detectionService');
 const { aggregateIntel } = require('../services/intelService');
+const { buildMetadataAssessment, createImageArtifact } = require('../services/mediaMetadataService');
+const { reverseImageSearch, shouldRunReverseImageSearch } = require('../services/reverseImageSearchService');
 const { calculateVerificationOutcome, runVerificationSources } = require('../services/verificationService');
 const {
     attachUploadedMediaToFinding,
@@ -30,6 +32,7 @@ const RELEVANT_ENV_KEYS = [
     'TWITTER_API_KEY',
     'TWITTER_API_SECRET',
     'TWITTER_BEARER_TOKEN',
+    'SERPAPI_API_KEY',
     'PERPLEXITY_API_KEY',
     'ENABLED_DETECTION_SOURCES',
     'ENABLED_VERIFICATION_SOURCES'
@@ -134,7 +137,17 @@ async function runCase(name, fn) {
 
 async function main() {
     await runCase('source config defaults use available sources', async () => {
-        applyEnv();
+        applyEnv({
+            OPENWEATHER_API_KEY: null,
+            TOMORROW_IO_API_KEY: null,
+            NEWSAPI_AI_KEY: null,
+            TWITTER_API_KEY: null,
+            TWITTER_API_SECRET: null,
+            TWITTER_BEARER_TOKEN: null,
+            PERPLEXITY_API_KEY: null,
+            ENABLED_DETECTION_SOURCES: null,
+            ENABLED_VERIFICATION_SOURCES: null
+        });
         const config = getSourceConfig();
 
         assert.deepEqual(
@@ -143,28 +156,67 @@ async function main() {
         );
         assert.deepEqual(config.verification.default_source_ids, ['usgs']);
         assert.equal(config.detection.providers.find((provider) => provider.id === 'openweather').available, false);
+        assert.equal(
+            config.verification.providers.find((provider) => provider.id === 'twitter_search').source_options?.[0]?.options?.length > 0,
+            true
+        );
     });
 
     await runCase('source config respects env-configured defaults', async () => {
         applyEnv({
             OPENWEATHER_API_KEY: 'weather-key',
             PERPLEXITY_API_KEY: 'perplexity-key',
-            ENABLED_DETECTION_SOURCES: 'usgs,openweather,unknown',
-            ENABLED_VERIFICATION_SOURCES: 'openweather,perplexity'
+            TWITTER_API_KEY: 'twitter-key',
+            TWITTER_API_SECRET: 'twitter-secret',
+            ENABLED_DETECTION_SOURCES: 'usgs,openweather,twitter_x,unknown',
+            ENABLED_VERIFICATION_SOURCES: 'twitter_search,openweather,perplexity'
         });
         const config = getSourceConfig();
 
-        assert.deepEqual(config.detection.default_source_ids, ['usgs', 'openweather']);
-        assert.deepEqual(config.verification.default_source_ids, ['openweather', 'perplexity']);
+        assert.deepEqual(config.detection.default_source_ids, ['usgs', 'openweather', 'twitter_x']);
+        assert.deepEqual(config.verification.default_source_ids, ['twitter_search', 'openweather', 'perplexity']);
     });
 
     await runCase('source selection filters unknown and unavailable providers', async () => {
-        applyEnv();
+        applyEnv({
+            OPENWEATHER_API_KEY: null,
+            TOMORROW_IO_API_KEY: null,
+            NEWSAPI_AI_KEY: null,
+            TWITTER_API_KEY: null,
+            TWITTER_API_SECRET: null,
+            TWITTER_BEARER_TOKEN: null,
+            PERPLEXITY_API_KEY: null
+        });
         const selection = resolveSourceSelection('detection', ['usgs', 'openweather', 'bogus']);
 
         assert.deepEqual(selection.resolved, ['usgs']);
         assert.deepEqual(selection.ignored_unavailable, ['openweather']);
         assert.deepEqual(selection.ignored_unknown, ['bogus']);
+    });
+
+    await runCase('source selection resolves Twitter account options', async () => {
+        applyEnv({
+            TWITTER_API_KEY: 'twitter-key',
+            TWITTER_API_SECRET: 'twitter-secret'
+        });
+        const selection = resolveSourceSelection(
+            'verification',
+            ['twitter_search'],
+            {
+                twitter_search: {
+                    twitter_accounts: ['eqalerts', 'bogus', 'lbci_news']
+                }
+            }
+        );
+
+        assert.deepEqual(
+            selection.resolved_source_options.twitter_search.twitter_accounts.resolved,
+            ['eqalerts', 'lbci_news']
+        );
+        assert.deepEqual(
+            selection.resolved_source_options.twitter_search.twitter_accounts.ignored_unknown,
+            ['bogus']
+        );
     });
 
     await runCase('sqlite paths resolve consistently from backend config', async () => {
@@ -190,6 +242,7 @@ async function main() {
 
     await runCase('runDetectionSources only executes selected providers', async () => {
         const calls = [];
+        const receivedOptions = [];
         const runnerMap = {
             usgs: {
                 label: 'USGS',
@@ -207,17 +260,30 @@ async function main() {
             },
             twitter_x: {
                 label: 'Twitter/X',
-                execute: async () => {
+                execute: async (_region, sourceOptions) => {
                     calls.push('twitter_x');
+                    receivedOptions.push(sourceOptions);
                     return { source: 'Twitter/X', success: true, data: [], count: 0 };
                 }
             }
         };
 
-        const results = await runDetectionSources('Lebanon', ['usgs', 'newsapi_ai'], runnerMap);
+        const results = await runDetectionSources(
+            'Lebanon',
+            ['usgs', 'newsapi_ai', 'twitter_x'],
+            runnerMap,
+            {
+                twitter_x: {
+                    twitter_accounts: {
+                        resolved: ['lbci_news']
+                    }
+                }
+            }
+        );
 
-        assert.deepEqual(calls.sort(), ['newsapi_ai', 'usgs']);
-        assert.deepEqual(Object.keys(results).sort(), ['newsapi_ai', 'usgs']);
+        assert.deepEqual(calls.sort(), ['newsapi_ai', 'twitter_x', 'usgs']);
+        assert.deepEqual(Object.keys(results).sort(), ['newsapi_ai', 'twitter_x', 'usgs']);
+        assert.deepEqual(receivedOptions, [{ twitter_accounts: { resolved: ['lbci_news'] } }]);
     });
 
     await runCase('summarizeDetectionResults works with partial source maps', async () => {
@@ -268,6 +334,117 @@ async function main() {
         assert.equal(aggregated.findings.filter((finding) => finding.source_type === 'seismic_sensor').length, 1);
     });
 
+    await runCase('metadata helper marks stripped Twitter images as neutral social copies', async () => {
+        const result = buildMetadataAssessment({
+            artifact: createImageArtifact({
+                sourceKind: 'twitter_url',
+                url: 'https://example.com/image.jpg',
+                context: { tweet_created_at: '2026-04-05T10:00:00.000Z' }
+            }),
+            metadata: {
+                capture_time: null,
+                gps: null,
+                device_make: null,
+                device_model: null,
+                software: null,
+                mime_type: 'image/jpeg',
+                byte_size: 2048,
+                width: null,
+                height: null,
+                has_exif: false,
+                has_xmp: false,
+                has_iptc: false
+            }
+        });
+
+        assert.ok(result.metadata_flags.includes('social_copy_metadata_missing'));
+        assert.equal(result.metadata_warning, false);
+    });
+
+    await runCase('metadata helper detects GPS conflicts and editing tags', async () => {
+        const result = buildMetadataAssessment({
+            artifact: createImageArtifact({
+                sourceKind: 'upload',
+                url: 'https://example.com/image.jpg'
+            }),
+            metadata: {
+                capture_time: null,
+                gps: { latitude: 40.7128, longitude: -74.0060 },
+                device_make: null,
+                device_model: null,
+                software: 'Adobe Photoshop',
+                mime_type: 'image/jpeg',
+                byte_size: 2048,
+                width: null,
+                height: null,
+                has_exif: true,
+                has_xmp: false,
+                has_iptc: false
+            },
+            eventDetails: { lat: 33.8938, lon: 35.5018 }
+        });
+
+        assert.ok(result.metadata_flags.includes('gps_far_from_event'));
+        assert.ok(result.metadata_flags.includes('editing_software_tag'));
+        assert.equal(result.metadata_warning, true);
+    });
+
+    await runCase('metadata helper detects capture time conflicts', async () => {
+        const result = buildMetadataAssessment({
+            artifact: createImageArtifact({
+                sourceKind: 'twitter_url',
+                url: 'https://example.com/image.jpg',
+                context: { tweet_created_at: '2026-04-05T10:00:00.000Z' }
+            }),
+            metadata: {
+                capture_time: '2026-04-05T10:05:00.000Z',
+                gps: null,
+                device_make: null,
+                device_model: null,
+                software: null,
+                mime_type: 'image/jpeg',
+                byte_size: 2048,
+                width: null,
+                height: null,
+                has_exif: true,
+                has_xmp: false,
+                has_iptc: false
+            }
+        });
+
+        assert.ok(result.metadata_flags.includes('capture_time_conflict'));
+        assert.equal(result.metadata_warning, true);
+    });
+
+    await runCase('reverse image search is triggered when metadata is missing on a social copy', async () => {
+        const shouldRun = shouldRunReverseImageSearch({
+            metadata_available: false,
+            metadata_flags: ['social_copy_metadata_missing']
+        }, {
+            is_relevant: true,
+            evidence_type: 'damage',
+            verification_value: 'high'
+        });
+
+        assert.equal(shouldRun, true);
+    });
+
+    await runCase('reverse image search reports unavailable when PERPLEXITY_API_KEY is missing', async () => {
+        applyEnv({ SERPAPI_API_KEY: null, PERPLEXITY_API_KEY: null });
+
+        const result = await reverseImageSearch({
+            imageArtifact: {
+                url: 'https://example.com/image.jpg',
+                context: {}
+            },
+            eventDetails: {},
+            imageAnalysis: {}
+        });
+
+        assert.equal(result.status, 'unavailable');
+        assert.equal(result.performed, false);
+    });
+
     await runCase('runVerificationSources skips Twitter and media analysis when Twitter is disabled', async () => {
         const calls = [];
         const result = await runVerificationSources({
@@ -275,7 +452,7 @@ async function main() {
             io: null,
             eventDetails: { type: 'EARTHQUAKE', region: 'Lebanon', lat: 33.9, lon: 35.5, description: 'Test event' },
             searchKeywords: {},
-            sourceSelection: { resolved: ['newsapi_ai', 'perplexity'] },
+            sourceSelection: { resolved: ['newsapi_ai', 'perplexity'], resolved_source_options: {} },
             deps: {
                 searchTwitter: async () => {
                     calls.push('twitter');
@@ -307,6 +484,107 @@ async function main() {
         assert.deepEqual(calls.sort(), ['news', 'perplexity']);
         assert.deepEqual(result.twitterData.texts, []);
         assert.equal(result.mediaAnalysis.analyzed, false);
+    });
+
+    await runCase('runVerificationSources forwards selected Twitter account options', async () => {
+        const receivedOptions = [];
+        await runVerificationSources({
+            alertId: 1,
+            io: null,
+            eventDetails: { type: 'EARTHQUAKE', region: 'Lebanon', lat: 33.9, lon: 35.5, description: 'Test event' },
+            searchKeywords: {},
+            sourceSelection: {
+                resolved: ['twitter_search'],
+                resolved_source_options: {
+                    twitter_search: {
+                        twitter_accounts: {
+                            resolved: ['eqalerts', 'lbci_news']
+                        }
+                    }
+                }
+            },
+            deps: {
+                searchTwitter: async (_eventDetails, _searchKeywords, sourceOptions) => {
+                    receivedOptions.push(sourceOptions);
+                    return { texts: [], metadata: [], image_urls: [], sources: {} };
+                },
+                searchNews: async () => [],
+                checkWeatherVerification: async () => null,
+                checkSeismicVerification: async () => null,
+                perplexitySearch: async () => ({ independent_confirmation_found: false, total_sources_found: 0, corroborating_sources: 0 }),
+                analyzeMedia: async () => ({ analyzed: false, images: [], summary: {} })
+            }
+        });
+
+        assert.deepEqual(receivedOptions, [{ twitter_accounts: { resolved: ['eqalerts', 'lbci_news'] } }]);
+    });
+
+    await runCase('runVerificationSources preserves metadata-rich media analysis output', async () => {
+        const result = await runVerificationSources({
+            alertId: 1,
+            io: null,
+            eventDetails: { type: 'EARTHQUAKE', region: 'Lebanon', lat: 33.9, lon: 35.5, description: 'Test event' },
+            searchKeywords: {},
+            sourceSelection: {
+                resolved: ['twitter_search'],
+                resolved_source_options: {}
+            },
+            deps: {
+                searchTwitter: async () => ({
+                    texts: [],
+                    metadata: [],
+                    image_artifacts: [{ source_kind: 'twitter_url', url: 'https://example.com/image.jpg', context: {} }],
+                    image_urls: ['https://example.com/image.jpg'],
+                    sources: {}
+                }),
+                searchNews: async () => [],
+                checkWeatherVerification: async () => null,
+                checkSeismicVerification: async () => null,
+                perplexitySearch: async () => ({ independent_confirmation_found: false, total_sources_found: 0, corroborating_sources: 0 }),
+                analyzeMedia: async () => ({
+                    analyzed: true,
+                    summary: {
+                        total_analyzed: 1,
+                        relevant_images: 1,
+                        high_value_evidence: 1,
+                        metadata_available_count: 1,
+                        metadata_warning_count: 1,
+                        reverse_search_performed_count: 1,
+                        reverse_search_warning_count: 1
+                    },
+                    images: [{
+                        url: 'https://example.com/image.jpg',
+                        metadata: { has_exif: true },
+                        metadata_flags: ['editing_software_tag'],
+                        metadata_notes: ['Metadata references editing software: Adobe Photoshop.'],
+                        metadata_available: true,
+                        metadata_warning: true,
+                        reverse_image_search: {
+                            performed: true,
+                            status: 'searched',
+                            likely_old: true,
+                            confidence: 'high',
+                            summary: 'This image appears in older reporting.',
+                            earliest_known_use: '2024-10-12T08:00:00.000Z',
+                            matches: [{
+                                title: 'Archived article',
+                                url: 'https://example.com/archive',
+                                published_at: '2024-10-12T08:00:00.000Z',
+                                reason: 'Same building facade and smoke pattern.'
+                            }],
+                            notes: ['Earlier reporting predates the claimed incident.']
+                        }
+                    }]
+                })
+            }
+        });
+
+        assert.equal(result.mediaAnalysis.summary.metadata_available_count, 1);
+        assert.equal(result.mediaAnalysis.summary.metadata_warning_count, 1);
+        assert.equal(result.mediaAnalysis.summary.reverse_search_performed_count, 1);
+        assert.equal(result.mediaAnalysis.summary.reverse_search_warning_count, 1);
+        assert.deepEqual(result.mediaAnalysis.images[0].metadata_flags, ['editing_software_tag']);
+        assert.equal(result.mediaAnalysis.images[0].reverse_image_search.likely_old, true);
     });
 
     await runCase('calculateVerificationOutcome excludes disabled sources from denominator and score inputs', async () => {
@@ -343,6 +621,10 @@ async function main() {
         assert.equal(outcome.confirmedSources, 1);
         assert.equal(outcome.perplexityTotal, 0);
         assert.equal(outcome.twitterFound, 0);
+        assert.equal(outcome.baseScore, 10);
+        assert.equal(outcome.baseScoreSource, 'semantic_score');
+        assert.equal(outcome.scientificBonus, 15);
+        assert.equal(outcome.perplexityBonus, 0);
         assert.equal(outcome.mediaBonus, 20);
         assert.equal(outcome.finalScore, 45);
     });

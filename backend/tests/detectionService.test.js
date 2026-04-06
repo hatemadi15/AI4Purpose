@@ -24,6 +24,7 @@ function createEarthquakeFeature({ magnitude = 4.8, place = 'Near Beirut', time 
 
 test('runDetectionSources only executes the selected providers', async () => {
     const calls = [];
+    const receivedOptions = [];
     const runnerMap = {
         usgs: {
             label: 'USGS',
@@ -41,17 +42,30 @@ test('runDetectionSources only executes the selected providers', async () => {
         },
         twitter_x: {
             label: 'Twitter/X',
-            execute: async () => {
+            execute: async (_region, sourceOptions) => {
                 calls.push('twitter_x');
+                receivedOptions.push(sourceOptions);
                 return { source: 'Twitter/X', success: true, data: [], count: 0 };
             }
         }
     };
 
-    const results = await runDetectionSources('Lebanon', ['usgs', 'newsapi_ai'], runnerMap);
+    const results = await runDetectionSources(
+        'Lebanon',
+        ['usgs', 'newsapi_ai', 'twitter_x'],
+        runnerMap,
+        {
+            twitter_x: {
+                twitter_accounts: {
+                    resolved: ['lbci_news']
+                }
+            }
+        }
+    );
 
-    assert.deepEqual(calls.sort(), ['newsapi_ai', 'usgs']);
-    assert.deepEqual(Object.keys(results).sort(), ['newsapi_ai', 'usgs']);
+    assert.deepEqual(calls.sort(), ['newsapi_ai', 'twitter_x', 'usgs']);
+    assert.deepEqual(Object.keys(results).sort(), ['newsapi_ai', 'twitter_x', 'usgs']);
+    assert.deepEqual(receivedOptions, [{ twitter_accounts: { resolved: ['lbci_news'] } }]);
 });
 
 test('summarizeDetectionResults works with partial source maps', () => {

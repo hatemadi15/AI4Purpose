@@ -234,9 +234,9 @@ router.get('/source-config', async (req, res) => {
 
 // POST /api/detect - Gather intel and return ALL findings for analyst review
 router.post('/detect', async (req, res) => {
-    const { region = 'Lebanon', source_ids } = req.body || {};
+    const { region = 'Lebanon', source_ids, source_options } = req.body || {};
     const io = req.app.get('io');
-    const sourceSelection = resolveSourceSelection('detection', source_ids);
+    const sourceSelection = resolveSourceSelection('detection', source_ids, source_options);
 
     try {
         io.emit('detection_status', { step: 0, message: 'Loading persisted findings history...', progress: 5 });
@@ -253,8 +253,8 @@ router.post('/detect', async (req, res) => {
         const shouldRunMinistry = sourceSelection.resolved.includes('ministry_info');
 
         const [detectionData, twitterIntel, ministryIntel, scrapedNews] = await Promise.all([
-            detectCrisis(region, detectionSourceIds),
-            shouldRunIntelTwitter ? fetchIntelTwitter(region) : Promise.resolve(null),
+            detectCrisis(region, detectionSourceIds, sourceSelection.resolved_source_options),
+            shouldRunIntelTwitter ? fetchIntelTwitter(region, sourceSelection.resolved_source_options?.intel_twitter || {}) : Promise.resolve(null),
             shouldRunMinistry ? fetchMinistryAlerts(region) : Promise.resolve(null),
             scraperSourceIds.length > 0 ? scrapeAllNews(region, scraperSourceIds) : Promise.resolve(null)
         ]);
